@@ -24,7 +24,7 @@ import type { EvalAssertion } from '../../src/lib/eval/assertions';
  */
 
 /** 评测用的文档。事实密集且**全部可机器校验** */
-const EVAL_DOCUMENT = `# 前缀缓存与成本优化
+export const EVAL_DOCUMENT = `# 前缀缓存与成本优化
 
 ## 核心机制
 
