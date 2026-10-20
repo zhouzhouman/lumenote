@@ -37,6 +37,9 @@ describe('Agent（Mock 模式）', () => {
       const detail = await waitForTaskSucceeded(user.client, taskId);
       expect(detail.type).toBe('agent');
       expect(detail.outputContent?.length ?? 0).toBeGreaterThan(0);
+      // 运行时证明 mock 模式真的生效（显式 env 不会被仓库 .env.local 覆盖）。
+      // MockProvider 的输出带固定标记；若真实模型被意外调用，这条会失败。
+      expect(detail.outputContent).toContain('Mock 模式');
 
       const outputMeta = (detail.outputMeta ?? {}) as {
         structured?: AgentStructuredOutput | null;
