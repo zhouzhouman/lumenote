@@ -32,11 +32,11 @@ Lumenote 的每条结果都能回答三个问题：
 
 | 项目 | 命令 | 本次实测结果 | 状态 |
 |---|---|---|---|
-| 单元测试 | `pnpm test` | 31 文件 / **656 测试**全部通过 | ✅ 已运行 |
+| 单元测试 | `pnpm test` | 32 文件 / **661 测试**全部通过 | ✅ 已运行 |
 | 集成测试 | `pnpm test:integration` | 8 文件 / **23 测试**（真实 PostgreSQL + `next dev`） | ✅ 已运行 |
-| 覆盖率 | `pnpm test:coverage` | statements 40.67 / branches 82.81 / functions 72.22 / lines 40.67；阈值 40/82/72/40 生效，退出码 0 | ✅ 已运行（阈值防倒退；覆盖率低的原因见「已知限制」） |
+| 覆盖率 | `pnpm test:coverage` | statements 41.03 / branches 82.90 / functions 71.64 / lines 41.03；阈值 41/82/71/41 | ✅ 已运行，退出码 0（只统计 `src/lib/**`，见测试章节口径说明） |
 | 生产构建 | `pnpm build` | 29 条路由（`Route (app)` 表）+ `ƒ Proxy (Middleware)`；无 middleware 弃用警告 | ✅ 已运行 |
-| 端到端冒烟 | `pnpm smoke` | Mock 模式 **28 断言**全部通过（登录→建任务→SSE→幂等重放） | ✅ 已运行 |
+| 端到端冒烟 | `pnpm smoke` | Mock 模式 **28 断言**全部通过（登录→建任务→SSE→幂等重放）；脚本**强制** `MOCK_LLM=true` 并清空三家厂商 Key，永不产生真实费用 | ✅ 已运行 |
 | 评测报告 | `MOCK_LLM=true pnpm eval:report` | Mock 模式生成 [docs/eval-report.md](docs/eval-report.md) | ✅ 已运行（**不代表真实模型质量**） |
 | standalone 产物 | `verify-standalone.mjs` | 按镜像布局 `node server.js`，**20/20** 断言，`/api/health` 200 且 `db.ok=true` | ✅ 已运行 |
 | Docker 构建/编排 | `docker build` / `docker compose` | — | ❌ **未运行**（本机未安装 Docker；仅 PyYAML 静态校验 51/51） |
@@ -61,15 +61,21 @@ dev 资源导致 hydration 失败；脚本只截 Mock 输出，并会校验页�
 # 1. 依赖（不要随意改 lockfile）
 corepack enable
 pnpm install --frozen-lockfile
+pnpm prisma:generate      # 生成 Prisma Client：全新克隆必须执行，否则 seed/dev 会报 client 未初始化
 
-# 2. 数据库：有 Docker 时起 Postgres + Redis
-docker compose up -d postgres redis
-#    没有 Docker 时：保证本机 PostgreSQL 16 监听 127.0.0.1:5432，
-#    scripts/dev.mjs 会通过 PGHOME / PG* 环境变量找到它（见 docs/demo-script.md §5）
-
-# 3. 环境变量（.env.example 默认 MOCK_LLM="true"，无需任何 Key 即可完整演示）
+# 2. 先创建环境变量（顺序很重要：docker compose 会在解析阶段校验 AUTH_SECRET，
+#    若此时还没有任何 env 来源，`docker compose up` 会直接报 AUTH_SECRET 未设置）
 cp .env.example .env.local
 #    至少要改 AUTH_SECRET：openssl rand -base64 32
+#    .env.example 默认 MOCK_LLM="true"，无需任何 Key 即可完整演示
+#
+#    ⚠️ compose 默认读取同目录下的 `.env`（不是 `.env.local`）。二选一：
+#      cp .env.local .env
+#      # 或：docker compose --env-file .env.local up -d postgres redis
+#    （`.env` 与 `.env.local` 都已在 .gitignore 中，不会入库）
+
+# 3. 数据库（有 Docker）；没有 Docker 见下方「无 Docker 的本地数据库」
+docker compose up -d postgres redis
 
 # 4. 迁移 + 演示数据（幂等，可重复执行）
 pnpm prisma:deploy       # 生产/本地应用迁移；不要用 prisma:migrate（开发期交互式迁移）
@@ -78,6 +84,28 @@ pnpm prisma:seed         # 内置 Prompt 模板 + 演示账号 demo@lumenote.dev
 # 5. 启动
 pnpm dev                 # http://localhost:3000
 ```
+
+> ⚠️ **演示账号是固定开发密码，只用于演示环境**。`pnpm prisma:seed` 写入的
+> `demo@lumenote.dev / Lumenote2026!` 拥有已知凭据；**生产环境不要执行这个 seed**，
+> 或执行后立即删除/改密该账号，否则等于给公网留了一个已知口令的后门。
+
+### 无 Docker 的本地数据库（可复制的建库命令）
+
+本机已有 PostgreSQL 16 在 `127.0.0.1:5432` 时，用超级用户执行一次：
+
+```bash
+# 创建应用角色与库（.env.example 的 DATABASE_URL 默认就是这组值）
+psql -U postgres -c "CREATE ROLE lumenote LOGIN PASSWORD 'lumenote';"
+psql -U postgres -c "CREATE DATABASE lumenote OWNER lumenote;"
+
+# 集成测试还需要独立的测试库（harness 会 DROP 该库的 public schema，绝不能指向开发库）
+psql -U postgres -c "CREATE DATABASE lumenote_test OWNER lumenote;"
+```
+
+- 执行等价 SQL 即可，不要求一定装 `psql`（任何 PG 客户端/管理工具都行）；
+- 若用便携版/自建实例：`initdb` 初始化数据目录、`pg_ctl start` 启动后，
+  用 `PGHOME` / `PGDATA` / `PG*` 告诉 `scripts/dev.mjs`（见 [docs/demo-script.md](docs/demo-script.md) §5）；
+- 数据库地址必须与 `.env.local` 的 `DATABASE_URL` / `DIRECT_URL` 一致。
 
 登录演示账号后即可体验全部能力；Mock 模式的输出顶部会明确标注
 「这是 **Mock 模式**输出，未调用真实模型」——不伪装成真实结果。
@@ -98,7 +126,7 @@ pnpm dev                 # http://localhost:3000
 - **鉴权**：自建 JWT（access 15min + refresh 7 天轮换）+ bcrypt + 邮箱验证码
 - **限流**：store 抽象，`memory`（默认）/ `redis`（多实例共享）
 - **可观测性**：OpenTelemetry tracing（JSONL / OTLP exporter）+ 数据库指标聚合
-- **测试**：Vitest 2（31 文件 / 656 单测）+ 真实 Postgres 集成测试（8 文件 / 23 测试）+ Playwright 截图脚本
+- **测试**：Vitest 2（32 文件 / 661 单测）+ 真实 Postgres 集成测试（8 文件 / 23 测试）+ Playwright 截图脚本
 
 ---
 
@@ -139,7 +167,10 @@ GET  /api/tasks/:id/stream  →  SSE 订阅输出，可断线重连（Last-Event
 - 状态机由代码驱动：`plan → act → observe → finalize / give_up`；
 - 双预算（步数 + token）、单工具额度、重复调用检测（第 3 次强制收敛）；
 - **工具全部只读**（Prompt 注入的真正防线）；
-- 结论必须带 `chunk:N` 证据，`checkEvidence()` 做确定性校验（引文是否真在分块里）。
+- 结论必须带 `chunk:N` 证据，`checkEvidence()` 做确定性校验（引文是否真在分块里）；
+- ⚠️ 模块拆分口径：`loop.ts` 只有 **43 行 re-export 门面**，真实状态机在
+  `orchestrator.ts`（约 570 行）。「968 → 43」只描述门面行数，**不代表复杂度下降了 90%**，
+  实际收益是职责分离与可测试性（各模块有独立单测）。
 
 ![Agent 结论与证据链](docs/assets/07-agent-evidence.png)
 
@@ -181,7 +212,10 @@ GET  /api/followup?taskId=...&whole=1            → 整条对话链
 
 - 向上找根再从根展开（入口可能来自链上任意一环）；
 - 展开用**逐层 BFS** 而不是只查一层 —— 只查一层会让「追问的追问」静默消失；
-- 上下文只带「上一轮结果 + 本轮问题」，避免成本随轮次线性增长。
+- 上下文只带「上一轮结果 + 本轮问题」，避免成本随轮次线性增长；
+- **成本保护与任务创建一致**：追问同样检查每日配额、并发上限与按用户限流；
+  BYOK 判定以父任务的 `credentialId` 快照为准（用自己 key 的追问不占站点配额）；
+  ⚠️ 但追问目前**没有幂等键**，双击/网络重试会重复建子任务并重复计费（见已知限制）。
 
 ### 只读分享 / 术语表 / 登录活动
 
@@ -205,8 +239,16 @@ DeepSeek 的定价有三个维度，缺一不可：
 不是风格问题。计价逻辑见 [src/lib/llm/pricing.ts](src/lib/llm/pricing.ts)
 （含峰谷判定与中国法定节假日表，核对日期 2026-10-11）。
 
-除了计价，还有三道成本闸门：**幂等键**（防重复扣费）、**每日配额**、**并发上限**。
-已知限制：配额是「先查后写」，并发提交理论上可绕过，靠并发上限与限流把窗口压小。
+除了计价，还有三道成本闸门，**覆盖所有会真实调用模型的创建路径**
+（`POST /api/tasks`、`POST /api/agent`、`POST /api/followup`）：
+
+1. **幂等键**：tasks / agent 走 `Idempotency-Key` + 数据库唯一约束；
+   ⚠️ 追问（followup）目前没有幂等键，双击/网络重试会重复建子任务并重复扣费（见已知限制）；
+2. **每日配额**：按任务数计；BYOK 用户不占站点配额（追问以父任务的 `credentialId` 快照判定）；
+3. **并发上限 + 按用户限流**：同一用户同时 1 个进行中任务；追问与新建任务用同一维度限流。
+
+已知限制：配额是「先查后写」，并发提交理论上可绕过，靠并发上限与限流把窗口压小；
+`RATE_LIMIT_PER_MINUTE`（全局限流）当前**未接入路由**，不要当成已生效的控制。
 
 ---
 
@@ -217,7 +259,7 @@ DeepSeek 的定价有三个维度，缺一不可：
 | **IDOR 越权** | `authzTask` 等统一入口，SQL 层带 `userId` 过滤；查不到返回 404 而非 403 |
 | **SSRF** | 协议/端口/白名单/DNS 解析后私网 IP 四层校验，**连接层固定已校验 IP**，重定向逐跳复验，云元数据地址硬编码拦截 |
 | **Prompt 注入** | 分隔符包裹 + 中和结束标签 + 输出侧脱敏 + **LLM 工具全只读** |
-| **重复计费** | `Idempotency-Key` + `Task @@unique([userId, idempotencyKey])` 双保险；`UsageLog.taskId @unique` 一次结算 |
+| **重复计费** | `Idempotency-Key` + `Task @@unique([userId, idempotencyKey])` 双保险；`UsageLog.taskId @unique` 一次结算。⚠️ 幂等键会先清洗字符集，**清洗后为空时回退随机 UUID**（否则所有请求都命中 `(userId, '')`，从第二条起会被静默当成「重放」返回第一条任务） |
 | **邮箱枚举** | 统一错误文案 + 真实 cost-12 哈希的假 bcrypt 比对消除时间差 + 发码接口响应完全一致 |
 | **账号爆破** | 限流（memory/redis）+ 失败锁定（落库，多实例一致）+ 安全事件审计 |
 | **Token 失效** | refresh token 服务端轮换，登出即销毁 session（不只是清 cookie） |
@@ -231,9 +273,16 @@ DeepSeek 的定价有三个维度，缺一不可：
   `middleware` 文件约定被 `proxy` 取代，且 Proxy 固定跑 Node runtime；
 - **CSP 目前是 Report-Only**：`script-src` 含 `unsafe-inline`、无 nonce；
   HSTS 仅生产发送且依赖反代终止 TLS；
-- **限流 IP 来自 `TRUST_PROXY_HOPS`**：默认 0 不信任 `X-Forwarded-For`
-  （防伪造，但所有请求共享 `unknown` 桶）；部署在反代后必须按层数配置，
-  且应用端口只对代理开放；配错的表现是「别人请求多了你也 429」；
+- **限流 IP 来自 `TRUST_PROXY_HOPS`**：默认 0 不信任 `X-Forwarded-For`（防伪造）。
+  ⚠️ **默认 0 的代价必须知道**：所有请求共享同一个 `unknown` 限流桶 ——
+  攻击者只要打满全局 auth 桶（login 30 次/5 分钟、register + verification 5 次/5 分钟），
+  **所有人都无法登录/注册**（429），相当于一个低成本的全局拒绝服务面。
+  直连暴露在公网时**必须保持 0**（否则客户端可自写 XFF 绕过限流）；
+  部署在反向代理后按真实层数设置，并保证应用端口只对代理开放。
+  `docker-compose.yml` 默认把 3000 端口发布到宿主 —— 生产部署者要有「端口是否真的暴露」的意识；
+- **Redis `fail-open` 的延迟代价**：Redis 挂死（不是拒绝连接，而是 TCP 无响应）时，
+  每个请求可能先等 `connectTimeout`（2s 量级）才降级到内存限流。
+  fail-open 保的是**可用性**，不保低延迟；对延迟敏感时用 `closed`（直接 429）或调小 connectTimeout；
 - **熔断器仍是进程内存**，多实例不共享（限流已可 Redis 共享）。
 
 > ⚠️ prompt 注入没有彻底解法。护栏只降低概率，真正的防线是不给模型写权限的工具与数据隔离。
@@ -295,11 +344,11 @@ node scripts/verify/byok.e2e.mjs
 
 | 命令 | 做什么 | 环境要求 | 本次是否运行 |
 |---|---|---|---|
-| `pnpm test` | 单元测试（纯逻辑，不连库/不联网） | 无 | ✅ 656 全过 |
+| `pnpm test` | 单元测试（纯逻辑，不连库/不联网） | 无 | ✅ 661 全过 |
 | `pnpm test:integration` | 真实 Postgres + 真实 HTTP 集成测试 | PostgreSQL 16 测试库；**先停掉 dev server**（Next 16 每项目只允许一个 dev server） | ✅ 23 全过 |
-| `pnpm test:coverage` | 单测 + 覆盖率（只统计 `src/lib/**`） | 无 | ✅ 基线 40.67/82.81/72.22/40.67，阈值 40/82/72/40 生效 |
+| `pnpm test:coverage` | 单测 + 覆盖率（只统计 `src/lib/**`） | 无 | ✅ 41.03 / 82.90 / 71.64 / 41.03，阈值 41/82/71/41，退出码 0 |
 | `pnpm test:redis` | 真实 Redis 限流验证（Lua 原子性 / TTL） | 可达 Redis | ❌ SKIPPED（退出码 2 = 未验证） |
-| `pnpm smoke` | 端到端冒烟：登录→建任务→轮询→SSE→幂等重放 | PostgreSQL；自动起 dev server（3200） | ✅ 28 断言 |
+| `pnpm smoke` | 端到端冒烟：登录→建任务→轮询→SSE→幂等重放 | PostgreSQL；自动起 dev server（3200）；脚本强制 Mock 并清空厂商 Key，**不产生真实费用** | ✅ 28 断言 |
 | `MOCK_LLM=true pnpm eval:report` | 生成评测报告 + trace | PostgreSQL | ✅ 仅 Mock 模式 |
 | `node scripts/docker/verify-standalone.mjs` | standalone 产物按镜像布局验证 | 先 `BUILD_STANDALONE=true pnpm build` | ✅ 20/20 |
 | `pnpm check` | typecheck + lint + test | 无 | ✅ |
@@ -337,13 +386,13 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
 还有一类**运行环境测试**（`tests/ssr-safety.test.tsx`）：在无 `window` 的环境里真的渲染一次
 客户端组件 —— `tsc` 与 ESLint 都不做运行环境检查。
 
-### 覆盖率为什么只有 ~40%
+### 覆盖率为什么只有 ~41%
 
 覆盖率只统计 `src/lib/**` 的纯逻辑，**不包含路由、页面、SSE、数据库路径** ——
-这些由集成测试覆盖。所以 40% 不代表产品整体验证程度，也不要把数字当质量结论。
-阈值是防倒退用的（实测基线向下取整：statements 40 / branches 82 / functions 72 / lines 40），
-当前基线 statements 40.67% / branches 82.81% / functions 72.22% / lines 40.67%，命令退出码 0。
-（历史的 36/83/70/36 是引入 observability 之前的旧基线；阈值会随代码同步更新，而不是反过来。）
+这些由集成测试覆盖。所以 41% 不代表产品整体验证程度，也不要把数字当质量结论。
+阈值是防倒退用的（**41/82/71/41**，2026-10-20 按实测基线向下取整），
+当前实测 41.03 / 82.90 / 71.64 / 41.03，`pnpm test:coverage` **退出码 0**；
+未来覆盖率下降会让 CI 失败。
 
 ---
 
@@ -401,8 +450,22 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
    - 无 Redis → `pnpm test:redis` SKIPPED（退出码 2）；CI 的 `rate-limit-redis` job 从未在 GitHub 跑过；
    - 无真实 Key → 真实模型评测未运行、零费用；judge 未校准；
    - 仓库没有 remote → CI workflow 未在 GitHub 运行，只做过 actionlint + PyYAML 校验。
-7. **更换 `AUTH_SECRET` 会导致已保存的 BYOK 密钥全部无法解密**（用户需重填）——
+7. **覆盖率只代表纯逻辑**：`pnpm test:coverage` 只统计 `src/lib/**`（41% 左右），
+   路由/SSE/数据库事务这些真正容易出问题的路径由集成测试覆盖；
+   不要把覆盖率数字当成产品整体验证程度。
+8. **更换 `AUTH_SECRET` 会导致已保存的 BYOK 密钥全部无法解密**（用户需重填）——
    加密密钥必须来自服务端，不能与密文同存；解密失败时管线退回站点通道，设置页可见失败记录。
+9. **追问（`POST /api/followup`）没有幂等键**：双击或网络重试会创建重复子任务并重复扣费。
+   「同一问题问两次就该跑两次」是产品语义，但网络重试属于同一意图 ——
+   目前靠前端禁用按钮缓解，彻底修法是客户端传唯一键或服务端按
+   (parentTaskId, question, 时间窗) 去重。
+10. **`RATE_LIMIT_PER_MINUTE` 未接入路由**：`rateLimitByIp()` 当前没有调用点，
+    该环境变量仅保留给限流 store / 后续接入，不要把它当作生效的全局限流；
+    实际生效的是 auth 与任务创建维度的限流桶（见安全章节）。
+11. **生产必须换掉 console 邮件通道**：`MAIL_TRANSPORT=console` 在生产环境不会发信、
+    也不会回传验证码 → 新用户无法注册；必须用 `resend` + `RESEND_API_KEY`（smtp 未接入）。
+12. **seed 的演示账号是固定开发密码**：`demo@lumenote.dev / Lumenote2026!` 只用于演示环境；
+    生产不要执行 `pnpm prisma:seed`，或执行后立即删除/改密该账号。
 
 ---
 
@@ -427,11 +490,12 @@ docker compose --profile app up -d app
 |---|---|
 | `AUTH_SECRET` | **必需**，无默认值，缺失时 compose 直接报错；`openssl rand -base64 32` |
 | `POSTGRES_PASSWORD` | Postgres 密码（compose 内默认 `lumenote`，生产必须改） |
-| `MAIL_TRANSPORT` / `RESEND_API_KEY` | 生产必须用 `resend`：`console` 通道在生产环境**硬性禁止**回传验证码 |
+| `MAIL_TRANSPORT` / `RESEND_API_KEY` | 生产必须用 `resend` 并注入 `RESEND_API_KEY`：`console` 通道在生产环境**硬性禁止**把验证码回传客户端，也**不会真的发信** → 新用户收不到验证码、无法注册（`smtp` 尚未接入，会返回明确错误） |
 | `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | 真实模型模式需要；只开 Mock 可留空 |
 | `MOCK_LLM` | 演示/预览环境设 `true`，避免真实付费调用 |
 | `RATE_LIMIT_DRIVER` / `REDIS_URL` / `RATE_LIMIT_FAIL_MODE` | 多实例限流用 `redis`；`open` 或 `closed` 决定 Redis 故障时的行为 |
-| `TRUST_PROXY_HOPS` | 反代层数；默认 0（不信任 XFF），配错会导致限流桶共享 |
+| `TRUST_PROXY_HOPS` | 反代层数；默认 0（不信任 XFF）。⚠️ 0 时所有请求共享 `unknown` 限流桶（可被刷成全局 429）；反代部署按实际层数设置，且应用端口只对代理开放。注意 compose 默认把 3000 端口发布到宿主 |
+| `RATE_LIMIT_PER_MINUTE` | ⚠️ **当前未接入路由**：`rateLimitByIp()` 没有调用点，该值仅保留给限流 store / 后续接入；实际生效的是 auth 与任务创建维度的限流桶 |
 | `NEXT_PUBLIC_APP_URL` | 站点地址（生产 HTTPS） |
 
 > ⚠️ **本环境未运行 `docker build` / `docker compose config`**，主路径未在本地验证。
@@ -462,7 +526,7 @@ docker compose --profile app up -d app
 
 ## 文档
 
-- [docs/architecture.md](docs/architecture.md) —— 架构、取舍与 4 张 Mermaid 图
+- [docs/architecture.md](docs/architecture.md) —— 架构、取舍与 5 张 Mermaid 图
 - [docs/interview-guide.md](docs/interview-guide.md) —— 面试指南：设计取舍 + 10 个追问
 - [docs/demo-script.md](docs/demo-script.md) —— 3 分钟演示脚本（Mock / 真实模型 / 失败兜底）
 - [docs/eval-report.md](docs/eval-report.md) —— Mock 模式评测与可观测性报告
