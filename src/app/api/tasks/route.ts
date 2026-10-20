@@ -93,7 +93,7 @@ export async function POST(req: Request) {
     const e = env();
 
     // 限流：单用户创建任务的频率
-    const rl = rateLimitByUser(userId, 'task:create');
+    const rl = await rateLimitByUser(userId, 'task:create');
     if (!rl.ok) {
       return fail('RATE_LIMITED', `操作过于频繁，请 ${rl.retryAfterSec} 秒后重试`, 429);
     }

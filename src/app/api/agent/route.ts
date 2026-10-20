@@ -55,7 +55,7 @@ export async function POST(req: Request) {
     const userId = await requireUserId();
     const e = env();
 
-    const rl = rateLimitByUser(userId, 'agent:create');
+    const rl = await rateLimitByUser(userId, 'agent:create');
     if (!rl.ok) {
       return fail('RATE_LIMITED', `操作过于频繁，请 ${rl.retryAfterSec} 秒后重试`, 429);
     }

@@ -47,7 +47,7 @@ const Schema = z.object({
 export async function POST(req: Request) {
   try {
     const ip = clientIp(req.headers);
-    const rl = rateLimitAuthByIp(ip, 'register');
+    const rl = await rateLimitAuthByIp(ip, 'register');
     if (!rl.ok) {
       return fail(
         'RATE_LIMITED',

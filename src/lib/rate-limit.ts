@@ -1,107 +1,48 @@
-import { env } from '@/lib/env';
-
 /**
- * 限流。
+ * 限流模块的稳定入口（facade）。
  *
- * ## 为什么本项目用内存实现而不是 Upstash Redis
+ * ⚠️ 历史原因：这个文件过去是全部实现（进程内存 Map）。现在实现拆到了
+ * `src/lib/rate-limit/` 目录（memory / redis 两个 store + 可信代理边界），
+ * 但**公开导入路径 `@/lib/rate-limit` 保持不变** —— 调用方不需要知道
+ * 审计点在哪、store 有几个实现。
  *
- * 看起来像偷懒，其实是刻意的：
- *  - Redis 方案在多实例下才有意义，而本项目 Serverless 多实例，内存计数实际是「每实例限流」
- *  - 引入 Redis 会带来额外成本、额外故障点、额外一个必须维护的服务
- *  - **限流的第一目标是「防意外刷爆」，不是「精确限速」**
- *    内存限流已经能挡住爬虫式高频请求（单实例足够）
- *  - 真正的成本保护不靠限流，靠幂等 + 每日配额 + 并发上限（三者都是 DB 层面，全局有效）
+ * 这里刻意用显式 re-export 而不是 `export *`：显式列表是一份「公开契约」，
+ * 新增内部辅助函数不会意外泄漏成公开 API，也方便一眼看出哪些函数被路由使用。
  *
- * 要升级为全局限流时，替换的就是这个文件 —— 这正是抽象它的理由。
+ * ## 为什么本项目当年只用内存实现，而现在要支持 Redis
  *
- * ⚠️ Serverless 限制：实例可能被冻结回收，计数随之丢失（失效方向是「放行」，
- * 属于 fail-open）。这在安全上是可接受的折中，但不能声称它是严格限流。
+ * 旧注释（保留其结论，仍然成立）：
+ *  - 限流的第一目标是「防意外刷爆」，不是「精确限速」；单实例内存限流足够挡住
+ *    爬虫式高频请求，真正的成本保护靠幂等 + 每日配额 + 并发上限（都在 DB 层，全局有效）。
+ *  - 内存实现失效的方向是「放行」（fail-open），安全上可接受，但不能宣称是严格限流。
+ *
+ * 新增 Redis 实现解决的是「**多实例 / Serverless 下每实例各算各的**」这个既定缺陷：
+ * 打开 RATE_LIMIT_DRIVER=redis 后计数全局共享。默认仍是 memory，
+ * 不配置 Redis 的部署行为与以前一致。Redis 故障时的降级语义见 index.ts。
  */
 
-interface Bucket {
-  count: number;
-  resetAt: number;
-}
+export {
+  rateLimit,
+  rateLimitByIp,
+  rateLimitByUser,
+  rateLimitAuthByIp,
+  purgeBuckets,
+  clientIp,
+  resolveClientIp,
+  normalizeIp,
+  UNKNOWN_CLIENT_IP,
+  rateLimitSettings,
+  createRateLimitStore,
+  resetRateLimitRuntime,
+} from './rate-limit/index';
 
-const globalForLimit = globalThis as unknown as { buckets?: Map<string, Bucket> };
-
-function buckets(): Map<string, Bucket> {
-  if (!globalForLimit.buckets) globalForLimit.buckets = new Map();
-  return globalForLimit.buckets;
-}
-
-export interface RateLimitResult {
-  ok: boolean;
-  limit: number;
-  remaining: number;
-  /** 建议的重试等待秒数 */
-  retryAfterSec: number;
-}
-
-/** 固定窗口计数。实现简单、内存占用小，精度上的不足可接受 */
-export function rateLimit(key: string, limit: number, windowSec: number): RateLimitResult {
-  const now = Date.now();
-  const map = buckets();
-  const existing = map.get(key);
-
-  if (!existing || existing.resetAt <= now) {
-    map.set(key, { count: 1, resetAt: now + windowSec * 1000 });
-    return { ok: true, limit, remaining: limit - 1, retryAfterSec: 0 };
-  }
-
-  if (existing.count >= limit) {
-    return {
-      ok: false,
-      limit,
-      remaining: 0,
-      retryAfterSec: Math.ceil((existing.resetAt - now) / 1000),
-    };
-  }
-
-  existing.count += 1;
-  return { ok: true, limit, remaining: limit - existing.count, retryAfterSec: 0 };
-}
-
-/** 每分钟请求上限（按 IP） */
-export function rateLimitByIp(ip: string): RateLimitResult {
-  const limit = env().RATE_LIMIT_PER_MINUTE;
-  return rateLimit(`ip:${ip}`, limit, 60);
-}
-
-/** 按用户的高价值操作限流（创建任务）。比 IP 限流更严格 */
-export function rateLimitByUser(userId: string, action: string): RateLimitResult {
-  const limits: Record<string, number> = {
-    'task:create': 20,
-    'auth:login': 10,
-    'auth:register': 5,
-  };
-  const limit = limits[action] ?? 10;
-  const windowSec = action.startsWith('auth:') ? 300 : 60;
-  return rateLimit(`user:${userId}:${action}`, limit, windowSec);
-}
-
-/** 按 IP 的注册/登录限流，防批量注册与密码喷洒 */
-export function rateLimitAuthByIp(ip: string, action: 'register' | 'login'): RateLimitResult {
-  const limit = action === 'register' ? 5 : 30;
-  return rateLimit(`ipauth:${ip}:${action}`, limit, 300);
-}
-
-/** 清理过期桶，防止 Map 无限增长（Serverless 长驻实例下必须做） */
-export function purgeBuckets(): number {
-  const now = Date.now();
-  let removed = 0;
-  for (const [k, v] of buckets()) {
-    if (v.resetAt <= now) {
-      buckets().delete(k);
-      removed += 1;
-    }
-  }
-  return removed;
-}
-
-/** 从请求头取客户端 IP。注意 X-Forwarded-For 可被伪造，仅作限流用途 */
-export function clientIp(headers: Headers): string {
-  const xff = headers.get('x-forwarded-for');
-  if (xff) return xff.split(',')[0]!.trim();
-  return headers.get('x-real-ip') ?? 'unknown';
-}
+export type {
+  RateLimitResult,
+  RateLimitStore,
+  RateLimitCallOptions,
+  RateLimitDriver,
+  RateLimitFailMode,
+  RateLimitCount,
+  RateLimitRuntimeSettings,
+  ClientIpOptions,
+} from './rate-limit/index';
