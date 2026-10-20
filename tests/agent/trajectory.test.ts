@@ -6,6 +6,7 @@ import {
   type AgentRunResult,
   type AgentStepRecord,
 } from '@/lib/agent/loop';
+import { StepRecorder } from '@/lib/agent/trajectory';
 import { ScriptedProvider, makeChunks, CTX, FINAL_JSON } from './helpers';
 
 /**
@@ -191,5 +192,57 @@ describe('checkTrajectory：确定性断言', () => {
   it('totalSteps 等于轨迹长度', () => {
     const steps = [step({ seq: 1 }), step({ seq: 2 })];
     expect(checkTrajectory(resultWith({ steps })).totalSteps).toBe(2);
+  });
+});
+
+// ============================================================
+// StepRecorder：轨迹记录的 seq / 回调不变量（拆分后新增）
+// ============================================================
+describe('StepRecorder：seq 分配与回调', () => {
+  function input(text: string): Omit<AgentStepRecord, 'seq'> {
+    return {
+      phase: 'finalize',
+      text,
+      reasoning: '',
+      toolCalls: [],
+      toolResults: [],
+      inputTokens: 1,
+      outputTokens: 1,
+      cumulativeTokens: 2,
+      latencyMs: 1,
+    };
+  }
+
+  it('seq 从 1 连续递增，返回对象与存储对象是同一个', () => {
+    const recorder = new StepRecorder();
+    const first = recorder.record(input('a'));
+    const second = recorder.record(input('b'));
+
+    expect(first.seq).toBe(1);
+    expect(second.seq).toBe(2);
+    expect(recorder.all).toEqual([first, second]);
+    expect(recorder.all[0]).toBe(first);
+  });
+
+  it('每次记录都先入队再回调（回调里能看到完整轨迹）', () => {
+    const seen: number[] = [];
+    const lengths: number[] = [];
+    const recorder = new StepRecorder((step) => {
+      seen.push(step.seq);
+      lengths.push(recorder.all.length);
+    });
+
+    recorder.record(input('a'));
+    recorder.record(input('b'));
+
+    expect(seen).toEqual([1, 2]);
+    // 回调发生时该步已经 push 进轨迹
+    expect(lengths).toEqual([1, 2]);
+  });
+
+  it('没有回调时也能正常记录', () => {
+    const recorder = new StepRecorder();
+    recorder.record(input('a'));
+    expect(recorder.all).toHaveLength(1);
   });
 });

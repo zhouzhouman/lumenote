@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseStructuredOutput, extractDisplayText } from '@/lib/agent/loop';
+import { normalizeStructured } from '@/lib/agent/output';
 import type { AgentStructuredOutput } from '@/lib/agent/loop';
 
 /**
@@ -198,5 +199,67 @@ describe('extractDisplayText：给用户看的散文', () => {
     expect(extractDisplayText('  这是一段纯说明文字，没有任何 JSON。  ', structured)).toBe(
       '这是一段纯说明文字，没有任何 JSON。',
     );
+  });
+});
+
+// ============================================================
+// normalizeStructured：模块级归一化（拆分后新增）
+// ============================================================
+describe('normalizeStructured：直接归一化任意 JSON 值', () => {
+  it('非对象 / 数组 / 空值 → null', () => {
+    expect(normalizeStructured(null)).toBeNull();
+    expect(normalizeStructured(undefined)).toBeNull();
+    expect(normalizeStructured(42)).toBeNull();
+    expect(normalizeStructured('str')).toBeNull();
+    expect(normalizeStructured([])).toBeNull();
+    expect(normalizeStructured([{ text: 'a' }])).toBeNull();
+  });
+
+  it('合法对象 → 补齐 evidence 与 limitations', () => {
+    expect(normalizeStructured({ conclusions: [{ text: 'a' }] })).toEqual({
+      conclusions: [{ text: 'a', evidence: [] }],
+    });
+    expect(normalizeStructured({ conclusions: [], limitations: ['缺数据'] })).toEqual({
+      conclusions: [],
+      limitations: ['缺数据'],
+    });
+  });
+
+  it('中文单数键名兜底，但单数形式必须是数组', () => {
+    expect(normalizeStructured({ conclusion: ['单数'] })).toEqual({
+      conclusions: [{ text: '单数', evidence: [] }],
+    });
+    expect(normalizeStructured({ conclusion: { text: 'a' } })).toBeNull();
+  });
+
+  it('证据项归一化：只保留至少有一个字符串字段的对象', () => {
+    expect(
+      normalizeStructured({
+        conclusions: [
+          {
+            text: 'a',
+            evidence: [
+              { source: 'chunk:1', quote: 'q' },
+              { source: 'chunk:2' },
+              { quote: 'q' },
+              {},
+              null,
+              'x',
+            ],
+          },
+        ],
+      }),
+    ).toEqual({
+      conclusions: [
+        {
+          text: 'a',
+          evidence: [
+            { source: 'chunk:1', quote: 'q' },
+            { source: 'chunk:2', quote: '' },
+            { source: '', quote: 'q' },
+          ],
+        },
+      ],
+    });
   });
 });

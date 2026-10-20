@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { runAgent, canonicalizeArgs, REPEAT_WARN_THRESHOLD, REPEAT_STOP_THRESHOLD } from '@/lib/agent/loop';
 import { TOOL_NAMES, TOOL_QUOTAS } from '@/lib/agent/tools';
+import { createToolDispatchState, dispatchToolCalls, resolveToolQuotas } from '@/lib/agent/tool-dispatch';
+import { RepeatCallTracker } from '@/lib/agent/budget';
+import type { ToolCall } from '@/lib/llm/types';
 import { ScriptedProvider, makeChunks, CTX, FINAL_JSON, findToolMessages } from './helpers';
 
 /**
@@ -232,5 +235,160 @@ describe('重复调用检测', () => {
 
     expect(result.stopReason).toBe('model_finalized');
     expect(result.steps).toHaveLength(4);
+  });
+});
+
+// ============================================================
+// 直接测试调度模块 API（拆分后新增）
+// ============================================================
+describe('dispatchToolCalls：模块级行为', () => {
+  function freshState() {
+    return createToolDispatchState(new RepeatCallTracker());
+  }
+
+  function call(id: string, name: string, args: Record<string, unknown> = {}): ToolCall {
+    return { id, name, arguments: args };
+  }
+
+  const DOC = makeChunks(['# 标题\n内容']);
+
+  it('成功执行：返回 toolResults 与 tool 消息；无新分块时 chunks 原样返回', async () => {
+    const outcome = await dispatchToolCalls({
+      calls: [call('c1', TOOL_NAMES.listSections)],
+      quotas: resolveToolQuotas(),
+      context: CTX,
+      chunks: DOC,
+      state: freshState(),
+    });
+
+    expect(outcome.chunks).toBe(DOC);
+    expect(outcome.hitQuota).toBe(false);
+    expect(outcome.hitRepeatStop).toBe(false);
+    expect(outcome.toolResults).toEqual([
+      {
+        toolCallId: 'c1',
+        name: TOOL_NAMES.listSections,
+        ok: true,
+        display: '列出文档结构：1 个带标题的章节',
+        error: undefined,
+      },
+    ]);
+    expect(outcome.toolMessages[0]).toMatchObject({
+      toolCallId: 'c1',
+      toolName: TOOL_NAMES.listSections,
+      output: { ok: true },
+    });
+  });
+
+  it('额度记账跨多次 dispatch 累计（state 复用）', async () => {
+    const state = freshState();
+    const quotas = resolveToolQuotas({ [TOOL_NAMES.listSections]: 1 });
+    const base = { quotas, context: CTX, chunks: DOC, state };
+
+    const first = await dispatchToolCalls({ ...base, calls: [call('c1', TOOL_NAMES.listSections)] });
+    const second = await dispatchToolCalls({ ...base, calls: [call('c2', TOOL_NAMES.listSections)] });
+
+    expect(first.hitQuota).toBe(false);
+    expect(second.hitQuota).toBe(true);
+    expect(second.toolResults[0]?.display).toBe(
+      'list_sections 已达次数上限（1 次），请基于已有信息作答',
+    );
+    expect(state.perTool.get(TOOL_NAMES.listSections)).toBe(1);
+  });
+
+  it('未知工具：不消耗额度、不进入重复计数，每次都是「未知工具」', async () => {
+    const state = freshState();
+    const base = { quotas: resolveToolQuotas(), context: CTX, chunks: DOC, state };
+
+    const outcome = await dispatchToolCalls({
+      ...base,
+      calls: [call('c1', 'delete_everything'), call('c2', 'delete_everything')],
+    });
+
+    expect(outcome.hitQuota).toBe(true);
+    expect(outcome.toolResults.map((r) => r.error)).toEqual([
+      '未知工具 delete_everything',
+      '未知工具 delete_everything',
+    ]);
+    expect(state.perTool.size).toBe(0);
+  });
+
+  it('重复检测跨 dispatch：warn 注入 hint，第 3 次 hitRepeatStop 且不执行', async () => {
+    const state = freshState();
+    const quotas = resolveToolQuotas({ [TOOL_NAMES.searchChunks]: 99 });
+    const args = { query: 'x' };
+    const base = { quotas, context: CTX, chunks: makeChunks(['x 内容']), state };
+
+    const d1 = await dispatchToolCalls({ ...base, calls: [call('c1', TOOL_NAMES.searchChunks, args)] });
+    const d2 = await dispatchToolCalls({ ...base, calls: [call('c2', TOOL_NAMES.searchChunks, args)] });
+    const d3 = await dispatchToolCalls({ ...base, calls: [call('c3', TOOL_NAMES.searchChunks, args)] });
+
+    expect(d1.hitRepeatStop).toBe(false);
+    expect(JSON.stringify(d1.toolMessages)).not.toContain('注意：你已经用相同参数查过');
+
+    expect(d2.hitRepeatStop).toBe(false);
+    expect(JSON.stringify(d2.toolMessages)).toContain('注意：你已经用相同参数查过');
+
+    expect(d3.hitRepeatStop).toBe(true);
+    expect(d3.toolResults[0]?.error).toContain('你已经用完全相同的参数调用过 search_chunks 2 次');
+    expect(state.perTool.get(TOOL_NAMES.searchChunks)).toBe(2);
+  });
+
+  it('键顺序不同视为重复（canonicalizeArgs 在调度层生效）', async () => {
+    const state = freshState();
+    const base = {
+      quotas: resolveToolQuotas({ [TOOL_NAMES.searchChunks]: 99 }),
+      context: CTX,
+      chunks: makeChunks(['x']),
+      state,
+    };
+
+    const d1 = await dispatchToolCalls({
+      ...base,
+      calls: [call('c1', TOOL_NAMES.searchChunks, { query: 'x', topK: 3 })],
+    });
+    const d2 = await dispatchToolCalls({
+      ...base,
+      calls: [call('c2', TOOL_NAMES.searchChunks, { topK: 3, query: 'x' })],
+    });
+
+    expect(d1.hitRepeatStop).toBe(false);
+    expect(JSON.stringify(d2.toolMessages)).toContain('注意：你已经用相同参数查过');
+  });
+
+  it('同一批多个工具按给定顺序执行', async () => {
+    const outcome = await dispatchToolCalls({
+      calls: [
+        call('c1', TOOL_NAMES.listSections),
+        call('c2', TOOL_NAMES.searchChunks, { query: '标题' }),
+      ],
+      quotas: resolveToolQuotas(),
+      context: CTX,
+      chunks: DOC,
+      state: freshState(),
+    });
+
+    expect(outcome.toolResults.map((r) => r.name)).toEqual([
+      TOOL_NAMES.listSections,
+      TOOL_NAMES.searchChunks,
+    ]);
+  });
+});
+
+describe('resolveToolQuotas：覆盖语义', () => {
+  it('覆盖指定工具，其余保持默认；不修改默认表', () => {
+    const resolved = resolveToolQuotas({ [TOOL_NAMES.listSections]: 1 });
+
+    expect(resolved[TOOL_NAMES.listSections]).toBe(1);
+    expect(resolved[TOOL_NAMES.searchChunks]).toBe(10);
+    expect(resolved[TOOL_NAMES.fetchUrl]).toBe(3);
+    // 默认表是模块级常量，不能被调用方覆盖污染
+    expect(TOOL_QUOTAS[TOOL_NAMES.listSections]).toBe(2);
+  });
+
+  it('不传覆盖时与默认表等价（新对象）', () => {
+    const resolved = resolveToolQuotas();
+    expect(resolved).toEqual(TOOL_QUOTAS);
+    expect(resolved).not.toBe(TOOL_QUOTAS);
   });
 });
