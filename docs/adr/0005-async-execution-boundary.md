@@ -4,7 +4,10 @@
 - **日期**：2026-10-20
 - **相关代码**：
   - [src/app/api/tasks/route.ts](../../src/app/api/tasks/route.ts)（创建任务、`after()`）
-  - [src/lib/pipeline/runner.ts](../../src/lib/pipeline/runner.ts)（管线执行与状态落库）
+  - [src/app/api/agent/route.ts](../../src/app/api/agent/route.ts)（Agent 任务、`after()`）
+  - [src/app/api/followup/route.ts](../../src/app/api/followup/route.ts)（追问子任务、`after()`）
+  - [src/lib/pipeline/runner.ts](../../src/lib/pipeline/runner.ts)（管线执行）
+  - [src/lib/pipeline/persistence.ts](../../src/lib/pipeline/persistence.ts)（成功/失败/取消的落库与脱敏）
   - [src/app/api/tasks/[id]/stream/route.ts](../../src/app/api/tasks/[id]/stream/route.ts)（SSE 订阅）
   - [Dockerfile](../../Dockerfile)、[docker-compose.yml](../../docker-compose.yml)（部署形态与迁移）
 - **相关 ADR**：[ADR-0001 两段式流式](0001-two-stage-streaming.md)
@@ -40,6 +43,10 @@
 2. 成本保护（并发上限、免费日配额）与 Prompt/术语表快照；
 3. 写入 `Task(status='queued')`；
 4. 用 `after()` 挂上管线，立即返回 `{ taskId, status, replayed }`。
+
+同样的 `after()` 语义还用在另外两个创建入口：`POST /api/agent`（Agent 循环）与
+`POST /api/followup`（追问子任务）。三处都是「响应之后、同一进程、best effort」，
+**没有任何一处是队列**；本文后面的边界对三者同样成立。
 
 实测（standalone 产物、Mock 模式）创建响应在 **98–157ms**，与管线耗时无关。
 
@@ -109,16 +116,20 @@ Serverless 下它只适合演示/短任务；
 | **进程崩溃 / 部署重启时任务仍是 `queued`** | 保持 `queued` | 一直排队；SSE 轮询到 10 分钟超时后 `done(status=running)` | **真实模式无恢复**；仅 Mock 模式在 SSE 分支用 `updateMany({status:'queued'} → 'running')` 原子抢占后**就地执行**（这是演示兜底，不是队列） |
 | **进程崩溃 / 部署重启时任务已是 `running`** | 永久保持 `running` | 同上；轮询超时后客户端被告知可重连，但重连也不会推进 | 无。只能按 `@@index([status, createdAt])` 做运维巡检/人工处理（schema 注释已写明该用途） |
 | POST 请求超时 / 客户端提前断开 | 不受影响（响应早已发出，管线在 `after()` 里） | 无感知；重新进入任务详情可继续看 | 管线继续；但见「不保证时长/不保证执行」 |
-| SSE 连接断开（切页、弱网、主动关闭） | 不影响任务；管线继续写库 | 重连带 `Last-Event-ID` 从断点续传；已完成任务直接回放 | 有：内容与状态都在数据库 |
+| SSE 连接断开（切页、弱网、主动关闭） | 不影响任务；管线继续写库 | **已完成任务**：重连带 `Last-Event-ID` 回放已落库内容；**进行中任务**：没有增量落盘，只能等后续增量（崩溃则无法续） | 部分：终态内容与状态在 DB，执行中的增量不在 |
 | SSE 单次订阅超过 10 分钟 | 任务可能仍在执行 | 收到 `error(STREAM_TIMEOUT, retryable:true)` + `done(status='running')`，客户端应重连 | 有（重连继续轮询），但受任务本身是否能跑完限制 |
 | 幂等重放（同一 `Idempotency-Key`） | 返回既有任务，不新建 | `{ taskId, status, replayed: true }` | 有：快路径查重 + 唯一约束兜底并发 |
 
 **一个必须承认的实现缺口**：
 管线目前**只在终态写 `outputContent`**（`persistResult` 一次更新），
 执行过程中没有把已生成的增量写库。因此 ADR-0001 里「重连可以拿到
-**已落库的部分结果**」这句话，当前只对「已成功完成的任务」成立；
-如果进程在 `running` 中途崩溃，已经花掉的 token 与已生成的内容都不会留下
-（只有 `UsageLog` 的部分计量）。这是本阶段的已知限制，不是设计意图。
+**已落库的部分结果**」这句话，当前只对「已完成的任务」成立；
+如果进程在 `running` 中途崩溃，**普通任务**已经花掉的 token 与已生成正文不会留下
+（只有 `UsageLog` 的部分计量）。
+
+⚠️ 对 **Agent 任务**要补充一句：它的轨迹是**逐步落库**的（`AgentStep`，
+每步一次 `persistStep`），所以崩溃会留下已执行步骤的轨迹；丢掉的是
+最终正文/结构化结论与未落库的后续步骤。两者不能混为一谈。
 
 ### 5. 为什么任务内容必须落库，而不是只放内存
 

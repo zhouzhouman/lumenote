@@ -5,6 +5,7 @@
 >
 > 演示账号：`demo@lumenote.dev` / `Lumenote2026!`（由 `pnpm prisma:seed` 幂等写入，
 > `dailyQuota=500`，并包含一条带证据链的演示 Agent 任务）。
+> ⚠️ 这是**固定开发密码**，仅用于演示环境；生产不要执行 seed，或执行后立即删除/改密该账号。
 
 ---
 
@@ -13,15 +14,19 @@
 ```bash
 # 1. 依赖（已装可跳过；worktree/CI 推荐 frozen lockfile）
 pnpm install --frozen-lockfile
+pnpm prisma:generate    # 全新克隆必须：生成 Prisma Client，否则 seed/dev 报 client 未初始化
 
 # 2. 环境变量：从样例复制，至少设置 AUTH_SECRET
 cp .env.example .env.local
 #   .env.example 默认 MOCK_LLM="true" —— 不配 Key 也能完整演示
 
 # 3. 数据库：有 Docker 时
+#   ⚠️ compose 默认读同目录的 `.env`（不是 `.env.local`）；先做一步映射：
+cp .env.local .env      # 或改用：docker compose --env-file .env.local up -d postgres redis
 docker compose up -d postgres redis
 #   没有 Docker 时：确保本机 PostgreSQL 16 在 127.0.0.1:5432，
-#   并让 scripts/dev.mjs 能找到它（PGHOME 或 PG* 变量，见 §5）
+#   并让 scripts/dev.mjs 能找到它（PGHOME 或 PG* 变量，见 §5）；
+#   建库命令（含集成测试库 lumenote_test）见 README「无 Docker 的本地数据库」一节
 
 # 4. 迁移 + 种子（幂等，可重复执行）
 pnpm prisma:deploy     # 不要用 prisma:migrate（那是开发期交互式迁移）
