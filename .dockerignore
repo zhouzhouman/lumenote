@@ -1,39 +1,72 @@
-# 用 Docker 构建时不需要的东西。
+# ============================================================
+# Docker 构建上下文排除清单
+# ============================================================
 #
-# 最重要的是 .env*：把本地密钥打进镜像层是极常见的安全事故，
-# 而且镜像层即使后续删除也仍可从历史中恢复，等于永久泄露。
+# 目标：构建上下文里**只有**构建真正需要的东西 ——
+#   源码 src/、public/、prisma/、以及构建配置。
+# 其余一切（依赖、产物、密钥、测试、文档、CI、worktree 本地状态）都不发送。
+#
+# ⚠️ 最重要的一类：.env*。
+# 把本地密钥打进构建上下文，等于把它留在构建缓存/镜像层历史里，
+# 镜像层即使后续删除也仍可从历史中恢复。密钥只允许通过环境变量注入。
+# 注意这里不保留 !.env.example —— 镜像运行时不需要样例文件，
+# 少一个文件就少一处「以为它只是文档」的信息面。
+# ============================================================
 
+# ---- 依赖与构建产物（容器内重新生成）----
 node_modules
 .next
 out
 build
+dist
 coverage
+*.tsbuildinfo
 
+# ---- 版本库与 CI ----
 .git
-.github
 .gitignore
+.github
 
+# ---- 密钥与环境变量：绝不进入构建上下文 ----
 .env
 .env.*
-!.env.example
+**/.env
+**/.env.*
 
+# ---- 容器自身的配置（Dockerfile 由构建器直接读取，不进上下文）----
 Dockerfile
-.dockerignore
-docker-compose.yml
-README.md
-docs
-tests
-*.test.ts
-vitest.config.ts
-
 Dockerfile.*
 .dockerignore
+docker-compose.yml
+docker-compose.*.yml
 
-npm-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
+# ---- 文档与测试：与构建产物无关 ----
+README.md
+CONTRIBUTING.md
+docs
+tests
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+vitest.config.ts
+vitest.integration.config.ts
+playwright-report
+test-results
 
+# ---- 验证/评测脚本与本地实验产物 ----
+scripts
+*.log
+.tmp-*
+.tmp-shots
+.worktrees
+.eval-results
+.lumenote-data
+*.trace.jsonl
+**/.auth-seed.json
+
+# ---- 编辑器与系统文件 ----
 .vscode
 .idea
-*.tsbuildinfo
+.DS_Store
+Thumbs.db
 next-env.d.ts

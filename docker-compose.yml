@@ -1,50 +1,161 @@
-# 本地开发用的 PostgreSQL。
+# ============================================================
+# Lumenote 单机部署编排（PostgreSQL + Redis + 应用 + 一次性迁移）
+# ============================================================
 #
-# 为什么单独起一个 compose 而不是用 docker-compose.yml：
-# 保持「开发服务」与「部署产物」两套配置分离。
-# 本文件可以随意改端口、改数据卷，不影响生产部署。
+# ## 启动顺序（迁移必须只执行一次）
 #
-# ⚠️ 这里固定了 postgres:16-alpine 而不是 latest：
-# latest 会在某次拉取时突然升级小版本，导致本地能跑、CI 挂掉的经典问题。
+#   docker compose up -d postgres redis     # 1. 起依赖，等 healthy
+#   docker compose run --rm migrate         # 2. 一次性迁移，退出码 0 才继续
+#   docker compose --profile app up -d app  # 3. 起应用
+#
+# 为什么 app 不在启动时执行 `prisma migrate deploy`：
+#   - 多副本时每个副本都会执行一遍迁移，把「部署顺序」交给竞速；
+#   - 迁移失败会让应用容器进入重启循环（restart: unless-stopped），
+#     日志被反复覆盖，真正的原因被埋掉；
+#   - 迁移只需要 schema 与 prisma CLI，而 app 镜像刻意不含 CLI（见 Dockerfile）。
+#   因此 migrate 是独立的**一次性**服务（restart: "no"），成功后退出。
+#   重复执行 `run --rm migrate` 是幂等的（已应用的迁移会被跳过）。
+#
+# ## 变量来源
+#
+#   compose 会自动读取本目录的 `.env` 做变量插值（`.env` 已被 .gitignore 忽略）。
+#   不要把 `.env.local` 直接喂给容器：它含 NODE_ENV=development，
+#   而且里面的 DATABASE_URL 指向宿主机的 localhost，在容器网络内不可达。
+#   镜像里**不包含**任何 .env 文件，密钥只通过下面的 environment 注入。
+#
+# ⚠️ 本机没有安装 Docker，本文件未执行 `docker compose config`，
+#    仅用 PyYAML 解析 + 人工核对语义（见 docs/adr/0005-async-execution-boundary.md）。
+# ============================================================
 
 services:
+  # ---------- PostgreSQL ----------
+  # 固定 16-alpine 而不是 latest：latest 会在某次拉取时突然升级小版本，
+  # 导致本地能跑、CI 挂掉的经典问题。
   postgres:
     image: postgres:16-alpine
     container_name: lumenote-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: lumenote
-      POSTGRES_PASSWORD: lumenote
-      POSTGRES_DB: lumenote_dev
+      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:-lumenote}'
+      # ⚠️ 必须与 .env.example / README 里的库名一致。
+      # 这里曾是 lumenote_dev，而 .env.example 的 DATABASE_URL 写的是 lumenote，
+      # 于是「先 up postgres 再按 README 连库」直接失败 —— P0 级不一致，已统一为 lumenote。
+      POSTGRES_DB: lumenote
       # 固定排序规则，避免不同机器上索引行为不一致
       POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
     ports:
-      # 左端口可改（如被占用就换 5433），右端口固定，容器内不动
-      - '5432:5432'
+      # 左端口可改（如被占用就设 POSTGRES_PORT=5433），右端口固定，容器内不动
+      - '${POSTGRES_PORT:-5432}:5432'
     volumes:
       - lumenote-pgdata:/var/lib/postgresql/data
     healthcheck:
       # 用 pg_isready 而不是看日志：日志有延迟，会让依赖它的步骤过早开始
-      test: ['CMD-SHELL', 'pg_isready -U lumenote -d lumenote_dev']
+      test: ['CMD-SHELL', 'pg_isready -U lumenote -d lumenote']
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 10s
 
+  # ---------- Redis ----------
   redis:
-    # 当前版本未接入 Redis（限流用内存实现）。
-    # 保留这个服务是为了将来「多实例部署时共享限流状态」这一步，
-    # 到时只需把 RATE_LIMIT_DRIVER 切到 redis，不用重新起环境。
+    # 已由 RATE_LIMIT_DRIVER=redis 使用（多实例共享限流状态；单实例仍可用默认的 memory）。
+    # 保留独立服务是因为「限流状态放进程内存」在多副本下等于每实例各限一遍，
+    # 切到 redis 只需要改环境变量，不需要改代码与编排。
     image: redis:7-alpine
     container_name: lumenote-redis
     restart: unless-stopped
     ports:
-      - '6379:6379'
+      - '${REDIS_PORT:-6379}:6379'
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # ---------- 一次性数据库迁移 ----------
+  # 用法：docker compose run --rm migrate
+  #   - `run` 的容器退出后即删除（--rm），不会常驻、不会被 restart 拉起；
+  #   - restart: "no" 是双保险：即使误用 `up migrate`，失败也不会反复重试；
+  #   - profile 只是防止 `docker compose up` 顺手跑迁移 ——
+  #     显式指定服务名（run/up migrate）时 profile 会被忽略，仍然可用。
+  migrate:
+    build:
+      context: .
+      target: migrator
+    image: lumenote-migrator:local
+    profiles: ['app']
+    restart: 'no'
+    environment:
+      NODE_ENV: production
+      # 容器网络内用服务名 postgres，不能用 localhost
+      DATABASE_URL: 'postgresql://lumenote:${POSTGRES_PASSWORD:-lumenote}@postgres:5432/lumenote?schema=public'
+      DIRECT_URL: 'postgresql://lumenote:${POSTGRES_PASSWORD:-lumenote}@postgres:5432/lumenote?schema=public'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------- 应用 ----------
+  # 用法：docker compose --profile app up -d app
+  # 前提：已执行过 migrate（顺序见文件顶部）。
+  app:
+    build:
+      context: .
+      target: runner
+    image: lumenote-app:local
+    profiles: ['app']
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - '${APP_PORT:-3000}:3000'
+    environment:
+      # 运行期固定 production：standalone server 依赖它选择生产行为
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: '1'
+      HOSTNAME: 0.0.0.0
+      PORT: '3000'
+      # 数据库：容器网络内走 postgres 服务名
+      DATABASE_URL: 'postgresql://lumenote:${POSTGRES_PASSWORD:-lumenote}@postgres:5432/lumenote?schema=public'
+      DIRECT_URL: 'postgresql://lumenote:${POSTGRES_PASSWORD:-lumenote}@postgres:5432/lumenote?schema=public'
+      # 密钥只从宿主的 .env / shell 注入，绝不 COPY 进镜像层。
+      # 未设置时 compose 直接报错退出（fail fast），避免用默认密钥跑起来更危险。
+      AUTH_SECRET: '${AUTH_SECRET:?请在 .env 或 shell 中设置 AUTH_SECRET（openssl rand -base64 32）}'
+      # ---- LLM Provider ----
+      DEEPSEEK_BASE_URL: '${DEEPSEEK_BASE_URL:-https://api.deepseek.com}'
+      DEEPSEEK_API_KEY: '${DEEPSEEK_API_KEY:-}'
+      OPENAI_API_KEY: '${OPENAI_API_KEY:-}'
+      DEFAULT_MODEL: '${DEFAULT_MODEL:-deepseek-v4.1-flash}'
+      FALLBACK_MODEL: '${FALLBACK_MODEL:-deepseek-v4-pro}'
+      # 演示/预览环境可设为 true，强制使用本地 mock，避免真实付费调用
+      MOCK_LLM: '${MOCK_LLM:-false}'
+      # ---- 限流 ----
+      # memory（默认，单实例）| redis（多实例共享，需要下面的 REDIS_URL）
+      RATE_LIMIT_DRIVER: '${RATE_LIMIT_DRIVER:-memory}'
+      REDIS_URL: 'redis://redis:6379'
+      RATE_LIMIT_PER_MINUTE: '${RATE_LIMIT_PER_MINUTE:-10}'
+      FREE_DAILY_QUOTA: '${FREE_DAILY_QUOTA:-20}'
+      MAX_CONCURRENT_TASKS_PER_USER: '${MAX_CONCURRENT_TASKS_PER_USER:-1}'
+      # ---- 应用 ----
+      NEXT_PUBLIC_APP_URL: '${NEXT_PUBLIC_APP_URL:-http://localhost:3000}'
+    healthcheck:
+      # 与 Dockerfile 中的 HEALTHCHECK 相同：/api/health 只有在 db.ok 时才 200，
+      # 因此这里同时覆盖「进程活着」与「数据库可用」。
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
   lumenote-pgdata:
