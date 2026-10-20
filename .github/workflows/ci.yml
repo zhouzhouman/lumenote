@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同一分支的新 push 会取消上一个未完成的运行，避免排队浪费额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 缓存 pnpm store 而不是 node_modules：
+      # node_modules 里有平台相关的二进制，跨平台缓存不可靠；
+      # store 是内容寻址的，可安全跨平台复用。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 pnpm
+        run: pnpm install --frozen-lockfile
+
+      # 数据库不需要真实实例：单测是纯逻辑，不连库。
+      # 提前给一份合法假值，避免因缺环境变量而整批失败。
+      - name: 准备环境变量
+        run: |
+          echo "AUTH_SECRET=ci-secret-at-least-32-characters-long-xxxx" >> "$GITHUB_ENV"
+          echo "DATABASE_URL=postgresql://u:p@localhost:5432/test" >> "$GITHUB_ENV"
+          echo "MOCK_LLM=true" >> "$GITHUB_ENV"
+          echo "DEFAULT_MODEL=deepseek-flash" >> "$GITHUB_ENV"
+
+      - name: Prisma schema 校验
+        run: pnpm prisma validate
+
+      - name: Prisma client 生成
+        run: pnpm prisma:generate
+
+      - name: 类型检查
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: 单元测试
+        run: pnpm test
+
+      - name: 构建
+        run: pnpm build
+        env:
+          # 构建期也需要这些值：Next.js 会在构建时求值部分模块
+          NEXT_TELEMETRY_DISABLED: '1'
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # 只在主干构建镜像：PR 里构建没有意义且拖慢检查
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录镜像仓库
+        uses: docker/login-action@v3
+        with:
+          # 仓库地址/凭据来自 Secrets，本地开发不会触发这条路径
+          registry: ${{ secrets.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.REGISTRY }}/lumenote
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

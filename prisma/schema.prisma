@@ -1,0 +1,775 @@
+// Lumenote — 可追溯的 AI 文本工作台
+// 数据模型设计说明（面试可讲）：
+//  1. Task 统一承载 summarize/translate/write 三种能力，避免三套重复表；用 type 区分 + 复合索引优化
+//  2. PromptTemplate 与 PromptVersion 分离，版本永不物理删除 —— 这是「Prompt 指纹」可溯源的基础
+//  3. Task 存promptVersionId 快照 + 用户当次填的 params，所以 Prompt 改版不影响历史记录复现
+//  4. 软删除只做在 Task（历史是用户资产，需回收站）；UsageLog 永不做软删（计量是财务语义，必须可审计）
+//  5. UsageLog.taskId 唯一 —— 保证一个任务只结算一次成本，是幂等的最终防线
+//  6. 分页用 cursor(keyset) 不用 offset，见 Task 的复合索引与 lib 的 cursor 编解码
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ⚠️ Prisma ORM v7 的连接配置不再写在 schema 中：
+//   url / directUrl 均已从 schema 移除（directUrl 在 v7 直接被删除）。
+//   连接串统一放在根目录 prisma.config.ts 的 datasource.url；
+//   PrismaClient 实例则通过 driver adapter（@prisma/adapter-pg）接收连接池。
+//   见 prisma.config.ts 与 src/lib/db.ts。
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// 认证
+// ============================================================
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  // free | pro（pro 为后续商业化预留，本项目不实现支付）
+  plan         String   @default("free")
+  // 免费用户每日任务配额（次），由 UsageLog 聚合消耗
+  dailyQuota   Int      @default(20)
+  /**
+   * 邮箱是否已通过验证码验证。
+   *
+   * 注册流程强制验证码，所以新用户恒为 true；
+   * 保留该字段是为了兼容「验证码功能上线前注册的老账号」——
+   * 那些账号没有验证记录，不能因为加了这个功能就把人锁在门外。
+   */
+  emailVerified Boolean @default(false)
+  // 最近一次成功登录时间。用于安全事件页与「异常登录」自查
+  lastLoginAt   DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions   Session[]
+  templates  PromptTemplate[]
+  glossary   GlossaryTerm[]
+  tasks      Task[]
+  shareLinks ShareLink[]
+  usageLogs  UsageLog[]
+  credentials ApiCredential[]
+  securityEvents SecurityEvent[]
+  /** 评测框架（阶段 4） */
+  evalDatasets      EvalDataset[]
+  evalRuns          EvalRun[]
+  judgeCalibrations JudgeCalibration[]
+
+  @@index([email])
+}
+
+// ============================================================
+// 登录失败计数与账号锁定
+// ============================================================
+//
+// 与限流的分工要讲清楚，两者不是一回事：
+//
+//   - **限流**（rate-limit.ts，内存）：防「请求太频繁」，滑动窗口按分钟计。
+//     它拦的是脚本刷接口，对「慢速撞库」无能为力 ——
+//     攻击者每分钟只试 2 次密码，永远不触发限流，但几天就能试完一个弱密码字典。
+//
+//   - **锁定**（本表，落库）：防「密码猜错太多次」，按小时/天计。
+//     它必须落库，因为内存实现在多实例下会失效（每个实例各算各的），
+//     而锁定是安全属性，不能依赖「恰好只有一个实例」。
+//
+// 记录 identifier（邮箱小写）与 ip 两个维度，任一维度超阈值就拒绝。
+model LoginAttempt {
+  id         String   @id @default(cuid())
+  /** 归一化后的邮箱；不做外键 —— 失败的尝试可能对应根本不存在的账号 */
+  identifier String
+  ip         String?
+  success    Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([identifier, createdAt])
+  @@index([ip, createdAt])
+}
+
+// ============================================================
+// 安全事件审计
+// ============================================================
+//
+// 为什么单独一张表，而不是打日志：
+//  - 日志会滚掉，安全事件需要「可回溯、可查询」
+//  - 用户自己也需要能看「谁在什么时候登录过我的账号」（异地登录自查）
+//  - 排查「为什么我被锁了」时，需要能列出具体是哪些失败尝试
+//
+// 注意：**只记事件与元信息，绝不记录密码或验证码明文**。
+model SecurityEvent {
+  id     String  @id @default(cuid())
+  /** 可空：注册失败这类事件还没有用户 */
+  userId String?
+  /** login_success | login_failed | login_locked | register | password_changed | credential_changed ... */
+  type   String
+  /** 事件相关的主体（如被尝试的邮箱），便于「同一邮箱的失败序列」聚合 */
+  subject String?
+  ip      String?
+  userAgent String?
+  /** 附加信息。同样不得含密码、验证码、密钥 */
+  meta    Json?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([type, createdAt(sort: Desc)])
+  @@index([subject, createdAt(sort: Desc)])
+}
+
+// ============================================================
+// 邮箱验证码
+// ============================================================
+//
+// 安全要点（每一条都对应一类真实攻击）：
+//
+//  1. **只存哈希**，不存明文。数据库泄露时验证码不能直接被拿来注册。
+//  2. **必须有过期时间**。否则一个泄露的验证码永久有效。
+//  3. **记录尝试次数**。没有它，6 位数字码可以在几分钟内被暴力枚举
+//     （100 万种组合，但 5 分钟内跑 10 万次请求对脚本毫无压力）。
+//  4. **用后即焚**。成功验证后立刻消耗掉，防重放。
+//  5. **同一邮箱同一用途只有一条有效记录**（发送新码时作废旧码），
+//     否则用户可以囤积多个有效码，扩大爆破面。
+model EmailVerificationCode {
+  id     String @id @default(cuid())
+  email  String
+  /** register | reset_password —— 显式区分用途，防「注册码用来重置密码」这类跨用途重放 */
+  purpose String
+  /** 验证码的 SHA-256 哈希（含 AUTH_SECRET 加盐），不存明文 */
+  codeHash String
+  expiresAt DateTime
+  /** 已尝试校验次数，超过上限直接作废 */
+  attempts Int      @default(0)
+  /** 已成功使用的时间；非空表示已消耗，不可再用 */
+  consumedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([email, purpose, createdAt(sort: Desc)])
+  @@index([expiresAt])
+}
+
+// ============================================================
+// 用户自带 LLM 凭证（BYOK，Bring Your Own Key）
+// ============================================================
+//
+// 设计要点（安全优先）：
+//
+//  1. **不存明文**。apiKeyEncrypted 是 AES-256-GCM 密文，
+//     密钥由 AUTH_SECRET 派生（见 src/lib/llm/credentials.ts）。
+//     数据库被拖库时，攻击者拿到的是密文 —— 而不是可以直接刷的钱。
+//
+//  2. **永不回传给前端**。列表接口只返回掩码串（sk-…abcd）。
+//     连密文都不出服务端，避免「密文被前端记住后再被 XSS 读走」这类链路。
+//
+//  3. **一个用户可有多个凭证，最多一个启用**。
+//     active 的唯一性由应用层保证（写入时把其他的置 false），
+//     因为 PostgreSQL 的部分唯一索引在 Prisma schema 里表达不了。
+//
+//  4. **baseUrl 必须白名单校验后再落库**。
+//     否则相当于拿用户的 key 去打任意地址，属于 SSRF 的变体，
+//     绝不能让用户自由填写（见 credentials.ts 的 validateBaseUrl）。
+model ApiCredential {
+  id     String @id @default(cuid())
+  userId String
+  /** 归属用户的标签，便于区分「公司 key」「个人 key」 */
+  label  String
+
+  /** openai-compatible 风格的端点。内置 deepseek / openai 可选自定义 baseUrl */
+  provider String
+  /** 该凭证使用的模型名。BYOK 场景下模型由用户决定，不做限制 */
+  model    String
+  /** 自定义端点（仅 provider 为 custom 时使用） */
+  baseUrl  String?
+
+  /** AES-256-GCM 密文：iv.authTag.ciphertext（base64url） */
+  apiKeyEncrypted String
+  /** 展示用掩码，形如 sk-…a1b2。**不是**密钥的一部分，不可用于调用 */
+  apiKeyHint      String
+
+  /** 是否启用。同一用户最多一条 active */
+  active Boolean @default(false)
+
+  /** 最近一次调用结果，便于用户自查 key 是否还有效 */
+  lastUsedAt    DateTime?
+  lastErrorCode String?
+  lastErrorAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, active])
+  @@index([userId])
+}
+
+model Session {
+  id          String   @id @default(cuid())
+  userId      String
+  // refresh token 的哈希（不存明文）；轮换时写入新值并使旧的失效
+  refreshHash String   @unique
+  expiresAt   DateTime
+  userAgent   String?
+  ip          String?
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  // 定期清理过期会话用
+  @@index([expiresAt])
+}
+
+// ============================================================
+// Prompt 模板与版本（可溯源的核心）
+// ============================================================
+
+model PromptTemplate {
+  id          String   @id @default(cuid())
+  // null = 系统内置模板
+  userId      String?
+  // 系统内置模板使用 "sys:" 前缀。
+  // 原因：PostgreSQL 的唯一约束中 NULL 不参与去重，userId 为 null 的多条内置模板
+  // 无法仅靠 @@unique([userId, slug]) 区分，加前缀是最简洁可靠的方案。
+  slug        String
+  name        String
+  // summarize | translate | write | general
+  category    String
+  description String?
+  // 变量定义 JSON: [{ key, label, type, options?, required, default? }]
+  variables   Json
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user     User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  versions PromptVersion[]
+  tasks    Task[]
+
+  @@unique([userId, slug])
+  @@index([category, isActive])
+}
+
+model PromptVersion {
+  id                 String   @id @default(cuid())
+  templateId         String
+  // 模板内单调递增
+  version            Int
+  systemPrompt       String
+  // 含 {{var}} 占位的用户提示词模板
+  userPromptTemplate String
+  // { model, temperature, maxTokens, chunkSize, thinking, reasoningEffort, ... }
+  params             Json
+  // 改版原因 —— 面试可讲「为什么从 v2 改回 v3」
+  notes              String?
+  // draft | active | archived —— 任一时刻每个 template 有且仅有一个 active
+  // 永不物理删除：历史 Task 引用了具体版本，删了就无法复现
+  status             String   @default("draft")
+  createdAt          DateTime @default(now())
+
+  template PromptTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  tasks    Task[]
+
+  @@unique([templateId, version])
+  @@index([templateId, status])
+}
+
+// ============================================================
+// 任务：统一承载三种能力
+// ============================================================
+
+model Task {
+  id     String @id @default(cuid())
+  userId String
+  // summarize | translate | write
+  type   String
+  title  String
+  // queued | running | succeeded | failed | canceled
+  status String @default("queued")
+
+  // ---- 输入 ----
+  // text | url | file
+  inputType    String
+  inputRef     String?
+  inputContent String?
+  inputMeta    Json?
+  //   { charCount, tokenCount, chunks, sourceHost, extractedAt, degraded? }
+
+  // ---- 输出 ----
+  outputContent String?
+  outputMeta    Json?
+  //   { keyPoints, keywords, readingTimeMin, glossaryScore, violations? }
+
+  // ---- 溯源三元组：模板 + 版本 + 用户当次填的参数 ----
+  templateId      String
+  promptVersionId String
+  params          Json
+
+  // 幂等键：同一用户重复提交同一 key 返回同一任务，不重复计费
+  idempotencyKey String?
+  // 渲染后的最终 prompt（大文本可只存 hash），用于精确复现
+  renderedPrompt String?
+
+  // 多轮追问：指向根任务
+  parentTaskId String?
+
+  // ---- 可观测性 ----
+  errorCode    String?
+  errorMessage String?
+  latencyMs    Int?
+  // 首 token 延迟 —— AI 应用特有的关键指标
+  ttftMs       Int?
+  // 是否走了降级链（本地启发式摘要）
+  degraded     Boolean @default(false)
+
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template      PromptTemplate   @relation(fields: [templateId], references: [id])
+  promptVersion PromptVersion    @relation(fields: [promptVersionId], references: [id])
+  parent        Task?            @relation("Thread", fields: [parentTaskId], references: [id], onDelete: SetNull)
+  children      Task[]           @relation("Thread")
+  versions      TaskVersion[]
+  shareLink     ShareLink?
+  usageLog      UsageLog?
+  chunks        KnowledgeChunk[]
+  /** Agent 任务的推理轨迹（普通任务为空） */
+  agentSteps    AgentStep[]
+
+  @@unique([userId, idempotencyKey])
+  // 主查询路径：某用户某类型的任务，按时间倒序
+  @@index([userId, type, createdAt(sort: Desc)])
+  // cursor 分页需要 (createdAt, id) 复合游标
+  @@index([userId, createdAt(sort: Desc), id])
+  // 过滤软删除
+  @@index([userId, deletedAt])
+  // 运维巡检：找出卡在 queued/running 的任务
+  @@index([status, createdAt])
+  // 防越权：单任务查询时同时命中 userId
+  @@index([userId, id])
+  @@index([parentTaskId])
+}
+
+// 写作助手的版本快照，diff 的数据基础
+model TaskVersion {
+  id              String   @id @default(cuid())
+  taskId          String
+  // 同一 task 下的迭代序号
+  seq             Int
+  content         String
+  // rewrite | polish | expand | compress | followup | original
+  operation       String
+  promptVersionId String
+  params          Json?
+  createdAt       DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, seq])
+  @@index([taskId, seq])
+}
+
+// ============================================================
+// 翻译术语表
+// ============================================================
+
+model GlossaryTerm {
+  id            String   @id @default(cuid())
+  userId        String
+  // 源词
+  source        String
+  // 目标译法
+  target        String
+  // 技术 | 医学 | 法律 | null(通用)
+  domain        String?
+  caseSensitive Boolean  @default(false)
+  note          String?
+  createdAt     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, source, domain])
+  @@index([userId, domain])
+}
+
+// ============================================================
+// 分享链接（只读快照）
+// ============================================================
+
+model ShareLink {
+  id           String    @id @default(cuid())
+  taskId       String    @unique
+  userId       String
+  // crypto.randomBytes(16).toString('base64url')，不可枚举
+  token        String    @unique
+  // null = 永不过期
+  expiresAt    DateTime?
+  revokedAt    DateTime?
+  viewCount    Int       @default(0)
+  lastViewedAt DateTime?
+  createdAt    DateTime  @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([expiresAt])
+}
+
+// ============================================================
+// 计量（成本核算的事实来源）
+// ============================================================
+
+model UsageLog {
+  id     String  @id @default(cuid())
+  userId String
+  // 唯一约束保证「一个任务只结算一次」—— 幂等的最终防线
+  taskId String? @unique
+
+  provider         String
+  model            String
+  // 输入 token 总量（含缓存命中部分）
+  promptTokens     Int     @default(0)
+  completionTokens Int     @default(0)
+  // 缓存命中的输入 token 数。DeepSeek 区分 cache hit/miss 计价，此字段是降本的核心证据
+  cachedTokens     Int     @default(0)
+  // 按计价时段与缓存分档换算后的成本（人民币元）
+  estimatedCost    Float   @default(0)
+  // 计价时段：offpeak 为 Peak 的半价，影响成本准确性
+  peakPricing      Boolean @default(false)
+
+  latencyMs Int?
+  ttftMs    Int?
+  success   Boolean  @default(true)
+  errorCode String?
+  // 各次重试 / 降级的轨迹，排查「为什么这次变贵了」
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task Task? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([createdAt])
+  @@index([userId, success])
+}
+
+// ============================================================
+// Agent 轨迹
+// ============================================================
+
+/**
+ * Agent 循环的每一步。
+ *
+ * ## 为什么轨迹要落库（这是「可追溯」在 Agent 场景的落地）
+ *
+ * 普通 LLM 任务的产物是「一段文本」，审计只需记录输入、参数与输出。
+ * Agent 的产物是**一条推理路径**：它检索了什么、为什么换关键词、
+ * 哪一步给出了结论。只存最终文本的话，「它是怎么得出这个结论的」
+ * 永远无法回答 —— 而 Agent 的错误往往不在结论本身，在**路径**上
+ * （工具误用、无依据断言、死循环）。
+ *
+ * ## 为什么用 @@unique([taskId, seq]) 而不是普通索引
+ *
+ * 与 UsageLog.taskId 的唯一约束同一个思路：**即使重试逻辑出 bug，
+ * 数据库也不会产生重复的步骤记录**。轨迹回放的可信度依赖这一点 ——
+ * 如果第 3 步出现两次，整个回放就是错的，而且很难发现。
+ */
+model AgentStep {
+  id     String @id @default(cuid())
+  taskId String
+  /** 步骤序号，从 1 开始。与 taskId 组成唯一约束 */
+  seq    Int
+  /** plan | act | observe | finalize | give_up */
+  phase  String
+
+  /** 本步模型产出的正文（可能为空 —— 直接发起工具调用时就没有正文） */
+  text      String?
+  /** 思维链。仅在 thinking 开启时有值，且必须原样回传否则下一轮 400（ADR-0004） */
+  reasoning String?
+
+  /** 本步发起的工具调用 [{id, name, arguments}] */
+  toolCalls   Json?
+  /** 每个工具调用的执行结果 [{toolCallId, name, ok, display, error}] */
+  toolResults Json?
+
+  inputTokens      Int @default(0)
+  outputTokens     Int @default(0)
+  /** 到本步为止的累计 token，便于在时间线上画出消耗曲线 */
+  cumulativeTokens Int @default(0)
+  latencyMs        Int @default(0)
+
+  /** 给人看的说明（例如「检索『缓存』：命中 3 段」） */
+  note      String?
+  createdAt DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // 一个任务的步骤序号唯一：轨迹回放可信度的基础
+  @@unique([taskId, seq])
+  // 按顺序取某任务的轨迹
+  @@index([taskId, seq])
+}
+
+// ============================================================
+// 评测框架
+//
+// 232 个单测保证「代码逻辑对」，但**没有一个测模型输出质量**。
+// 这一组表补上那个空洞：改了一版 prompt 之后，怎么知道没把
+// 另外 20 个用例弄差 —— 靠手工看几条是不够的。
+// ============================================================
+
+/**
+ * 用例集。
+ *
+ * 一个用例集对应「一类任务的评测」：它绑定任务类型与模板，
+ * 因为不同能力的断言完全不同（摘要要查要点数，翻译要查术语一致性）。
+ * 混在一个集里会让断言变成一个巨大的 switch。
+ */
+model EvalDataset {
+  id     String @id @default(cuid())
+  userId String
+  name   String
+  description String?
+  /** summarize | translate | write | agent —— 决定跑哪个管线 */
+  taskType String
+
+  /** 运行时的默认参数（模板变量）。用例可以覆盖其中某些键 */
+  defaultParams Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cases EvalCase[]
+  runs  EvalRun[]
+
+  @@unique([userId, name])
+  @@index([userId, taskType])
+}
+
+/**
+ * 单个评测用例。
+ *
+ * ## 为什么「期望」是一组断言而不是标准答案
+ *
+ * 固定标准答案（golden answer）对生成式任务是错的：同一段内容的合理摘要
+ * 可能有十几种写法，逐字比对会把好结果判成失败，于是没人愿意看评测报告。
+ * 所以期望写成**可判定的特征**：必须包含什么、不得出现什么、
+ * 证据链是否完整、结构是否合法。
+ *
+ * 主观维度（够不够好）交给 LLM judge，而 judge 本身用人工标注校准（见下）。
+ */
+model EvalCase {
+  id        String @id @default(cuid())
+  datasetId String
+  /** 用例名，报告里显示 */
+  name      String
+  /** 输入内容 */
+  input     String
+  /** 覆盖数据集的参数（可空） */
+  params    Json?
+  /**
+   * 断言列表。JSON 数组，元素形如：
+   *   { kind: 'contains', value: '50 倍', description?: string }
+   *   { kind: 'not_contains', value: '可能' }
+   *   { kind: 'max_length', value: 2000 }
+   *   { kind: 'min_length', value: 100 }
+   *   { kind: 'must_be_json' }
+   *   { kind: 'agent_evidence_rate', value: 0.8 }
+   *   { kind: 'agent_no_unsupported' }
+   *   { kind: 'agent_tool_used', value: 'search_chunks' }
+   *   { kind: 'agent_no_loop' }
+   *   { kind: 'regex', value: '\\d+' }
+   *   { kind: 'judge', value: { dimension: 'faithfulness', rubric: '...' }, weight?: 2 }
+   */
+  expectations Json
+  /** 加权用：关键用例给更高权重，报告里权重大的失败更醒目 */
+  weight       Int      @default(1)
+  /** 标记为回归用例：曾经失败过、修好之后要一直盯着 */
+  isRegression Boolean  @default(false)
+  enabled      Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+
+  dataset   EvalDataset      @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  results   EvalCaseResult[]
+
+  @@index([datasetId, enabled])
+}
+
+/**
+ * 一次评测运行。
+ *
+ * `baselineRunId` 是「与谁对比」—— 回归报告的一切都基于它。
+ * 把基线做成一个字段而不是"上一次运行"，是因为用户可能想
+ * 固定跟某个已知良好的版本长期对比。
+ */
+model EvalRun {
+  id        String @id @default(cuid())
+  datasetId String
+  userId    String
+
+  /** 本次评测的提示词版本。改 prompt 后跑评测，这个字段就是对比的锚点 */
+  promptVersionId String
+  templateId      String
+  /** 运行时用的模型（快照） */
+  model           String?
+  /** judge 的配置快照 —— judge 自身也必须可追溯，否则评测结果无法解释 */
+  judgeModel      String?
+  judgePromptVersion String?
+
+  /** running | succeeded | failed */
+  status String @default("running")
+
+  /** 汇总指标（跑完后写入，避免报告每次都重算） */
+  totalCases    Int   @default(0)
+  passedCases   Int   @default(0)
+  failedCases   Int   @default(0)
+  /** 加权通过率：关键用例权重更高 */
+  weightedScore Float @default(0)
+  totalCostUsd  Float @default(0)
+  totalTokens   Int   @default(0)
+  durationMs    Int   @default(0)
+
+  /** 对比基线。为空表示这是首次运行 */
+  baselineRunId String?
+
+  errorMessage String?
+  createdAt    DateTime @default(now())
+  completedAt  DateTime?
+
+  dataset  EvalDataset     @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  results  EvalCaseResult[]
+
+  @@index([datasetId, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+/** 单用例结果 */
+model EvalCaseResult {
+  id      String @id @default(cuid())
+  runId   String
+  caseId  String
+
+  status String
+  /** 0~1 的得分（加权断言通过比例） */
+  score  Float @default(0)
+  /** 模型输出。保留原文以便人工复核「为什么这条失败」 */
+  output String?
+
+  /** 每条断言的判定结果 [{kind, passed, reason, judge?, matchedBy?}] */
+  assertions Json?
+  /** Agent 任务的轨迹摘要（工具、步数、证据链率） */
+  trace      Json?
+
+  inputTokens  Int @default(0)
+  outputTokens Int @default(0)
+  costUsd      Float @default(0)
+  latencyMs    Int   @default(0)
+  errorMessage String?
+
+  createdAt DateTime @default(now())
+
+  run  EvalRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  case EvalCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, caseId])
+  @@index([runId])
+}
+
+/**
+ * 人工校准样本：用来证明 LLM judge 本身可信。
+ *
+ * ## 为什么必须有这张表（这是整个评测框架最关键的一环）
+ *
+ * LLM-as-judge 最大的问题是**没人验证 judge 本身**。如果 judge 自己就飘，
+ * 那么"通过率 87%"这个数字毫无意义 —— 它只是 judge 的偏好。
+ *
+ * 所以每引入或修改一个 judge 配置，先在人工标注集上算一致率：
+ * 低于阈值就**拒绝这次 judge 变更**（不是警告，是拒绝）。
+ *
+ * 样本只标一个维度（一条校准样本对应一个 dimension），
+ * 因为「这条输出整体打几分」这种问题人自己都答不一致。
+ */
+model JudgeCalibration {
+  id        String @id @default(cuid())
+  userId    String
+  /** 被评的维度，例如 faithfulness / relevance / completeness */
+  dimension String
+  /** 送给 judge 的原始材料（源文档，**不是**模型输出） */
+  input     String
+  /**
+   * 当时问的问题（agent 任务才有）。
+   *
+   * ⚠️ 这个字段原本缺失，导致「切题度」维度**在结构上无法校准** ——
+   * 判断切题必须知道问的是什么，而表里没有存它。
+   * 实测时 judge 直接回复「未给出具体问题，无法确认是否切题」，
+   * 我当时误把原因归为"样本太少"，其实一半原因是缺这个字段。
+   */
+  question  String?
+  output    String
+  /** 人工打分 1~5 */
+  humanScore Int
+  /** judge 打分 1~5（跑 judge 后写入，用于算一致率） */
+  judgeScore Int?
+  /** judge 给出的理由 */
+  judgeReason String?
+  /** 是否与人工一致（差 ≤1 视为一致，写入时算好便于聚合） */
+  agreed    Boolean?
+
+  /**
+   * 是否是**脚本构造的种子样本**（不是真人独立标注）。
+   *
+   * ## 为什么必须区分（这是校准诚信的关键）
+   *
+   * `scripts/eval/dataset.ts` 里的 9 条样本，分数是按质量档位构造的 ——
+   * 构造者在写分数时**知道模型会怎么答、也知道 judge 大概打几分**。
+   * 那不是独立标注，是"照着答案打分"，它证明不了 judge 可信。
+   *
+   * 所以种子样本：
+   *   - 保留（让 calibrate 命令能跑通，演示机制）
+   *   - 但**不计入校准闸门**（见 runner.ts 里 gate 的查询条件）
+   *
+   * 否则会出现最糟的情况：用我自己编的分数把闸门打开了，
+   * 然后拿这个"通过校准"的 judge 去评真实用例 —— 假的可信度比没有更危险。
+   */
+  isSeed    Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, dimension])
+  /** 闸门查询路径：按用户 + 维度取**非种子**样本 */
+  @@index([userId, dimension, isSeed])
+}
+
+// ============================================================
+// 向量检索位（Week 6 可启用）
+// 预留 pgvector 表结构：Week 1-5 不写入，仅保留接口设计，
+// 面试可讲「为什么预留了向量检索位，以及为何本阶段不启用」
+// ============================================================
+
+model KnowledgeChunk {
+  id        String                       @id @default(cuid())
+  taskId    String
+  seq       Int
+  content   String
+  // 需要启用 pgvector 扩展：CREATE EXTENSION IF NOT EXISTS vector;
+  // 启用后改为：embedding Unsupported("vector(1536)")?
+  embedding Unsupported("vector(1536)")?
+  createdAt DateTime                     @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, seq])
+}

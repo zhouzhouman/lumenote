@@ -1,0 +1,34 @@
+version: 2
+updates:
+  # 运行时依赖：语义化版本内自动合并补丁
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(deps)'
+    groups:
+      # AI SDK 与 Next 是升级最易破坏项目的两个，单独成组便于一起验证
+      ai-and-framework:
+        patterns:
+          - 'ai'
+          - '@ai-sdk/*'
+          - 'next'
+          - 'react'
+          - 'react-dom'
+      database:
+        patterns:
+          - 'prisma'
+          - '@prisma/*'
+
+  # GitHub Actions 本身也要跟进，供应链风险不可忽视
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: 'chore(ci)'

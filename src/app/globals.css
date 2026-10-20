@@ -1,0 +1,234 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --primary: 221 83% 53%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 221 83% 53%;
+    --radius: 0.6rem;
+  }
+
+  .dark {
+    --background: 222 47% 8%;
+    --foreground: 210 40% 96%;
+    --card: 222 47% 11%;
+    --card-foreground: 210 40% 96%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 222 47% 11%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 217 33% 17%;
+    --accent-foreground: 210 40% 96%;
+    --destructive: 0 63% 45%;
+    --destructive-foreground: 210 40% 96%;
+    --border: 217 33% 20%;
+    --input: 217 33% 20%;
+    --ring: 217 91% 60%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+}
+
+@layer components {
+  /* 流式输出时的光标效果 —— 让用户明确知道「还在生成」 */
+  .stream-cursor::after {
+    content: '▍';
+    @apply ml-0.5 inline-block animate-pulse text-primary;
+  }
+
+  /*
+   * Markdown 渲染的基础排版。
+   *
+   * ⚠️ 这套规则必须配合 `components/ui/markdown.tsx` 使用。
+   * 之前输出是「纯文本直接塞进带这个类名的 div」，于是下面所有选择器都匹配不到元素
+   * —— 链接、标题、列表的样式全部形同虚设。类名存在但没人用得上，是比没有更坏的假象。
+   */
+  .prose-lumenote {
+    @apply text-sm leading-7;
+    /* 段落内部的软换行仍按用户预期显示，但空行由 <p> 的 margin 表达，
+       因此不再使用 white-space: pre-wrap（否则间距会叠加成两倍） */
+    white-space: pre-wrap;
+  }
+  .prose-lumenote > *:first-child {
+    @apply mt-0;
+  }
+  .prose-lumenote > *:last-child {
+    @apply mb-0;
+  }
+  .prose-lumenote h1 {
+    @apply mb-3 mt-6 text-xl font-semibold;
+  }
+  .prose-lumenote h2 {
+    @apply mb-2 mt-5 text-lg font-semibold;
+  }
+  .prose-lumenote h3 {
+    @apply mb-2 mt-4 text-base font-semibold;
+  }
+  .prose-lumenote h4,
+  .prose-lumenote h5,
+  .prose-lumenote h6 {
+    @apply mb-2 mt-4 text-sm font-semibold;
+  }
+  .prose-lumenote p {
+    @apply my-3;
+  }
+  .prose-lumenote ul {
+    @apply my-3 list-disc space-y-1 pl-6;
+  }
+  .prose-lumenote ol {
+    @apply my-3 list-decimal space-y-1 pl-6;
+  }
+  .prose-lumenote li > ul,
+  .prose-lumenote li > ol {
+    @apply my-1;
+  }
+  .prose-lumenote blockquote {
+    @apply my-3 border-l-2 border-primary/40 bg-muted/40 py-2 pl-4 text-muted-foreground;
+  }
+  .prose-lumenote code {
+    @apply rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em];
+  }
+  .prose-lumenote pre {
+    @apply my-3 overflow-x-auto rounded-lg bg-muted p-3;
+  }
+  /* 代码块内保留原始换行，且不继承上面那条 white-space: pre-wrap 的换行语义差异 */
+  .prose-lumenote pre code {
+    @apply whitespace-pre bg-transparent p-0 text-[0.85em];
+  }
+  .prose-lumenote a {
+    @apply text-primary underline underline-offset-2;
+  }
+  .prose-lumenote strong {
+    @apply font-semibold;
+  }
+  .prose-lumenote hr {
+    @apply my-4 border-border;
+  }
+}
+
+/*
+ * 首页视觉。
+ *
+ * ## 设计取向（参考 DeepSeek 官网的做法）
+ *
+ * 1. **靠留白与字号层级建立质感，而不是靠装饰**。
+ *    大标题 + 克制的辅色 + 大量空白，比堆渐变和阴影耐看得多。
+ * 2. **渐变只用在两处**：主标题里的一个短语、背景的柔和光斑。
+ *    到处发光是廉价感的来源，克制才显得"贵"。
+ * 3. **产品预览用真实数据**（Token 数、缓存命中率、成本、降级标记），
+ *    不是摆几个假方块 —— 首页要证明的正是"我们知道 AI 应用该记录什么"。
+ * 4. 颜色全部走 CSS 变量（bg-background / text-muted-foreground），
+ *    所以亮色与暗色自动都成立，不需要写两套样式。
+ */
+@layer components {
+  /* 渐变文字：只给主标题里的一个短语用，用多了就俗 */
+  .text-gradient {
+    @apply bg-gradient-to-r from-primary via-sky-500 to-cyan-400 bg-clip-text text-transparent;
+  }
+
+  /* 背景光斑。用 radial-gradient 而非图片：省一次请求，且能跟随主题变量 */
+  .hero-glow {
+    @apply pointer-events-none absolute inset-0 -z-10 overflow-hidden;
+  }
+  .hero-glow::before,
+  .hero-glow::after {
+    content: '';
+    @apply absolute rounded-full blur-3xl;
+  }
+  .hero-glow::before {
+    @apply -top-32 left-1/4 h-[26rem] w-[26rem] bg-primary/20;
+  }
+  .hero-glow::after {
+    @apply -top-20 right-1/4 h-[22rem] w-[22rem] bg-cyan-400/15;
+  }
+
+  /*
+   * 细网格底纹。
+   *
+   * ⚠️ 这里有个容易翻车的点：直接画 1px 实线网格会变成显眼的"方格纸"，
+   * 把整个首屏拉成草稿本的样子。做法是把线本身调得极淡（用 border 变量
+   * 但只有 ~35% 不透明度），再用遮罩让它向下淡出，并压低整体透明度 ——
+   * 目标是"退后一层几乎察觉不到的秩序感"，而不是让人看见网格。
+   */
+  .grid-backdrop {
+    background-image:
+      linear-gradient(to right, hsl(var(--border) / 0.35) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(var(--border) / 0.35) 1px, transparent 1px);
+    background-size: 64px 64px;
+    opacity: 0.5;
+    /* 遮罩让网格向外淡出，避免看起来像"贴上去的一块布" */
+    mask-image: radial-gradient(ellipse 70% 55% at 50% 0%, #000 20%, transparent 95%);
+    -webkit-mask-image: radial-gradient(ellipse 70% 55% at 50% 0%, #000 20%, transparent 95%);
+  }
+
+  /* 卡片悬浮：只抬 0.5 且加一点同色阴影，动效要克制 */
+  .card-lift {
+    @apply transition-all duration-200;
+  }
+  .card-lift:hover {
+    @apply -translate-y-0.5 border-primary/40 shadow-lg shadow-primary/5;
+  }
+
+  /* 入场动画。纯 CSS 实现，不引 framer-motion（为一个淡入加 40KB 依赖不划算） */
+  .rise {
+    animation: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .rise-delay-1 {
+    animation-delay: 0.06s;
+  }
+  .rise-delay-2 {
+    animation-delay: 0.12s;
+  }
+  .rise-delay-3 {
+    animation-delay: 0.18s;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 尊重系统的"减少动态效果"设置 —— 无障碍要求，不是可选项 */
+@media (prefers-reduced-motion: reduce) {
+  .rise,
+  .rise-delay-1,
+  .rise-delay-2,
+  .rise-delay-3 {
+    animation: none;
+  }
+  .card-lift:hover {
+    transform: none;
+  }
+}

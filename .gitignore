@@ -1,0 +1,46 @@
+# ---- 依赖与构建产物 ----
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# ---- 环境变量：绝不入库 ----
+# API Key 与数据库连接串只放 .env.local / 平台 Secret，不提交
+.env
+.env.local
+.env*.local
+!.env.example
+
+# ---- 测试与覆盖率 ----
+coverage/
+# 验收脚本的临时产物：预置的测试账号与**验证码**。
+# 虽然是非生产环境的测试数据，但它包含可用的验证码，
+# 没有理由让它们进入版本库。
+scripts/verify/.auth-seed.json
+.tmp-shots/
+
+# ---- 数据库 ----
+# 本地 docker-compose 起的库数据
+.lumenote-data/
+*.sqlite
+*.db
+
+# ---- 日志 ----
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# ---- 编辑器与系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- Vercel ----
+.vercel
+
+# ---- Sentry ----
+.sentryclirc

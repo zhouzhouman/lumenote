@@ -1,0 +1,39 @@
+# 用 Docker 构建时不需要的东西。
+#
+# 最重要的是 .env*：把本地密钥打进镜像层是极常见的安全事故，
+# 而且镜像层即使后续删除也仍可从历史中恢复，等于永久泄露。
+
+node_modules
+.next
+out
+build
+coverage
+
+.git
+.github
+.gitignore
+
+.env
+.env.*
+!.env.example
+
+Dockerfile
+.dockerignore
+docker-compose.yml
+README.md
+docs
+tests
+*.test.ts
+vitest.config.ts
+
+Dockerfile.*
+.dockerignore
+
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+.vscode
+.idea
+*.tsbuildinfo
+next-env.d.ts

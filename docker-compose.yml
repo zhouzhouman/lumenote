@@ -1,0 +1,50 @@
+# 本地开发用的 PostgreSQL。
+#
+# 为什么单独起一个 compose 而不是用 docker-compose.yml：
+# 保持「开发服务」与「部署产物」两套配置分离。
+# 本文件可以随意改端口、改数据卷，不影响生产部署。
+#
+# ⚠️ 这里固定了 postgres:16-alpine 而不是 latest：
+# latest 会在某次拉取时突然升级小版本，导致本地能跑、CI 挂掉的经典问题。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lumenote-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lumenote
+      POSTGRES_PASSWORD: lumenote
+      POSTGRES_DB: lumenote_dev
+      # 固定排序规则，避免不同机器上索引行为不一致
+      POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
+    ports:
+      # 左端口可改（如被占用就换 5433），右端口固定，容器内不动
+      - '5432:5432'
+    volumes:
+      - lumenote-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # 用 pg_isready 而不是看日志：日志有延迟，会让依赖它的步骤过早开始
+      test: ['CMD-SHELL', 'pg_isready -U lumenote -d lumenote_dev']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    # 当前版本未接入 Redis（限流用内存实现）。
+    # 保留这个服务是为了将来「多实例部署时共享限流状态」这一步，
+    # 到时只需把 RATE_LIMIT_DRIVER 切到 redis，不用重新起环境。
+    image: redis:7-alpine
+    container_name: lumenote-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  lumenote-pgdata:
