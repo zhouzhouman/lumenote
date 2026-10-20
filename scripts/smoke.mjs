@@ -39,10 +39,22 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectDevBundlerArgs, explainBundlerChoice } from './demo/bundler.mjs';
+import { config as loadEnv } from 'dotenv';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const IS_WIN = process.platform === 'win32';
+
+/**
+ * 显式加载 `.env.local` / `.env`。
+ *
+ * 为什么必须自己做：`next dev` 与 `next start` 会由 Next 自动读 `.env.local`，
+ * 但 **standalone 的 `node server.js` 不会**。冒烟脚本可能选中 standalone 产物
+ * （构建过 BUILD_STANDALONE 后常见），若只依赖 Next 的自动加载，子进程会因
+ * `DATABASE_URL` 未配置而启动成功、所有请求 500（曾真实发生）。
+ * 这里统一加载，三种启动模式行为一致；进程里已有的同名变量优先（dotenv 默认不覆盖）。
+ */
+loadEnv({ path: [path.join(ROOT, '.env.local'), path.join(ROOT, '.env')], quiet: true });
 
 const ENV = {
   baseUrl: process.env.SMOKE_BASE_URL?.replace(/\/+$/, '') ?? '',
@@ -264,8 +276,13 @@ function spawnServer() {
       ...process.env,
       PORT: String(ENV.port),
       HOSTNAME: '127.0.0.1',
-      // 冒烟永远在 mock 模式：绝不因为环境残留而真的调用付费模型
-      MOCK_LLM: process.env.MOCK_LLM ?? 'true',
+      // 冒烟**永远**在 mock 模式：绝不因为环境残留（shell 里导出 MOCK_LLM=false、
+      // .env.local 配了真实 Key）而真的调用付费模型。三个厂商 Key 一并清空，
+      // 即使 mock 开关意外失效，应用也会在启动期直接失败，而不是静默产生费用。
+      MOCK_LLM: 'true',
+      DEEPSEEK_API_KEY: '',
+      OPENAI_API_KEY: '',
+      RESEND_API_KEY: '',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: cmd === 'pnpm' && IS_WIN,

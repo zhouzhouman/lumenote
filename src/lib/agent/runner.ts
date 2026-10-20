@@ -129,14 +129,14 @@ async function runAgentPipelineCore(
   /**
    * 轨迹落库。
    *
-   * ⚠️ 用 createMany + skipDuplicates，而不是逐条 create。
+   * ⚠️ 逐条 `create` + 忽略唯一约束冲突（P2002），而不是 createMany。
    *
    * 原因：`AgentStep` 上有 `@@unique([taskId, seq])`。如果任务因为
-   * 重试或 after() 重复触发而跑了第二遍，逐条 create 会在第二条
-   * 抛唯一约束错误并中断整个管线 —— 而正确行为是**忽略重复的那一遍**。
-   * skipDuplicates 让"唯一约束保护"与"不中断执行"同时成立。
+   * 重试或 after() 重复触发而跑了第二遍，再写同一 seq 会抛唯一约束错误；
+   * 正确行为是**忽略重复的那一遍**、继续执行。这里用「逐条写 + catch P2002」
+   * 实现同样语义：唯一约束是保护，不是中断点。
    *
-   * 同时用 inset 去重：同一批里 seq 不能重复，否则 createMany 自身会报错。
+   * 同时用 persistedSeqs 去重：同一批里 seq 不能重复，否则会反复撞约束。
    */
   const persistedSeqs = new Set<number>();
 

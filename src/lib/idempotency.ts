@@ -69,7 +69,13 @@ export async function idempotentTask<T>(
 export function normalizeIdempotencyKey(header: string | null): string {
   if (!header) return crypto.randomUUID();
   // 长度上限，防止超长 key 撑爆索引；限制字符集防注入
-  return header.slice(0, 64).replace(/[^A-Za-z0-9._:-]/g, '');
+  const sanitized = header.slice(0, 64).replace(/[^A-Za-z0-9._:-]/g, '');
+  /**
+   * ⚠️ 清洗后可能变成空串（例如 header 全是中文、空格或符号）。
+   * 若直接返回 ''，同一用户所有这类请求都会命中 (userId, '') 这个唯一键，
+   * 幂等快路径会把第二条起静默当成「重放」返回第一条任务 —— 必须回退成随机键。
+   */
+  return sanitized || crypto.randomUUID();
 }
 
 export function isUniqueViolation(e: unknown): boolean {

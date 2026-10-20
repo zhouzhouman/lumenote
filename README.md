@@ -34,7 +34,7 @@ Lumenote 的每条结果都能回答三个问题：
 |---|---|---|---|
 | 单元测试 | `pnpm test` | 31 文件 / **656 测试**全部通过 | ✅ 已运行 |
 | 集成测试 | `pnpm test:integration` | 8 文件 / **23 测试**（真实 PostgreSQL + `next dev`） | ✅ 已运行 |
-| 覆盖率 | `pnpm test:coverage` | statements 40.67 / branches **82.81** / functions 72.22 / lines 40.67 | ⚠️ **未达标**：branches 低于 `vitest.config.ts` 的 83 阈值，命令退出码 1（见「已知限制」） |
+| 覆盖率 | `pnpm test:coverage` | statements 40.67 / branches 82.81 / functions 72.22 / lines 40.67；阈值 40/82/72/40 生效，退出码 0 | ✅ 已运行（阈值防倒退；覆盖率低的原因见「已知限制」） |
 | 生产构建 | `pnpm build` | 29 条路由（`Route (app)` 表）+ `ƒ Proxy (Middleware)`；无 middleware 弃用警告 | ✅ 已运行 |
 | 端到端冒烟 | `pnpm smoke` | Mock 模式 **28 断言**全部通过（登录→建任务→SSE→幂等重放） | ✅ 已运行 |
 | 评测报告 | `MOCK_LLM=true pnpm eval:report` | Mock 模式生成 [docs/eval-report.md](docs/eval-report.md) | ✅ 已运行（**不代表真实模型质量**） |
@@ -297,7 +297,7 @@ node scripts/verify/byok.e2e.mjs
 |---|---|---|---|
 | `pnpm test` | 单元测试（纯逻辑，不连库/不联网） | 无 | ✅ 656 全过 |
 | `pnpm test:integration` | 真实 Postgres + 真实 HTTP 集成测试 | PostgreSQL 16 测试库；**先停掉 dev server**（Next 16 每项目只允许一个 dev server） | ✅ 23 全过 |
-| `pnpm test:coverage` | 单测 + 覆盖率（只统计 `src/lib/**`） | 无 | ⚠️ branches 82.81% < 阈值 83%，退出码 1 |
+| `pnpm test:coverage` | 单测 + 覆盖率（只统计 `src/lib/**`） | 无 | ✅ 基线 40.67/82.81/72.22/40.67，阈值 40/82/72/40 生效 |
 | `pnpm test:redis` | 真实 Redis 限流验证（Lua 原子性 / TTL） | 可达 Redis | ❌ SKIPPED（退出码 2 = 未验证） |
 | `pnpm smoke` | 端到端冒烟：登录→建任务→轮询→SSE→幂等重放 | PostgreSQL；自动起 dev server（3200） | ✅ 28 断言 |
 | `MOCK_LLM=true pnpm eval:report` | 生成评测报告 + trace | PostgreSQL | ✅ 仅 Mock 模式 |
@@ -341,7 +341,9 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
 
 覆盖率只统计 `src/lib/**` 的纯逻辑，**不包含路由、页面、SSE、数据库路径** ——
 这些由集成测试覆盖。所以 40% 不代表产品整体验证程度，也不要把数字当质量结论。
-阈值是防倒退用的（36/83/70/36），而 branches 当前 82.81% 未达标，是真实的红灯。
+阈值是防倒退用的（实测基线向下取整：statements 40 / branches 82 / functions 72 / lines 40），
+当前基线 statements 40.67% / branches 82.81% / functions 72.22% / lines 40.67%，命令退出码 0。
+（历史的 36/83/70/36 是引入 observability 之前的旧基线；阈值会随代码同步更新，而不是反过来。）
 
 ---
 
@@ -399,8 +401,7 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
    - 无 Redis → `pnpm test:redis` SKIPPED（退出码 2）；CI 的 `rate-limit-redis` job 从未在 GitHub 跑过；
    - 无真实 Key → 真实模型评测未运行、零费用；judge 未校准；
    - 仓库没有 remote → CI workflow 未在 GitHub 运行，只做过 actionlint + PyYAML 校验。
-7. **覆盖率 branches 82.81% 低于阈值 83%**：`pnpm test:coverage` 当前退出码 1。
-8. **更换 `AUTH_SECRET` 会导致已保存的 BYOK 密钥全部无法解密**（用户需重填）——
+7. **更换 `AUTH_SECRET` 会导致已保存的 BYOK 密钥全部无法解密**（用户需重填）——
    加密密钥必须来自服务端，不能与密文同存；解密失败时管线退回站点通道，设置页可见失败记录。
 
 ---

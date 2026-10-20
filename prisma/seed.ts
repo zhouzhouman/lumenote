@@ -794,6 +794,19 @@ async function printCounts() {
 }
 
 async function main() {
+  /**
+   * 生产环境告警（不是硬失败：Docker/演示部署可能确实需要在 production 下 seed）。
+   * 固定密码的 demo 账号是公开凭据，真实生产库不应该存在它。
+   */
+  if (process.env.NODE_ENV === 'production') {
+    console.warn(
+      '[seed] ⚠️ 正在 production 环境写入演示数据：会创建固定密码账号 demo@lumenote.dev（Lumenote2026!）。',
+    );
+    console.warn(
+      '[seed]    真实生产部署请勿执行，或在执行后立即删除/禁用该账号（它等同于公开凭据）。',
+    );
+  }
+
   console.info('[seed] 开始写入内置模板…');
 
   const slugs: string[] = [];

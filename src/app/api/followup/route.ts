@@ -3,8 +3,10 @@ import { fail, handleError, ok } from '@/lib/api';
 import { requireUserId, authzTask, AuthzError } from '@/lib/auth/authz';
 import { TASK_TYPES, normalizeTaskType } from '@/lib/tasks/types';
 import { runSummarizePipeline } from '@/lib/pipeline/runner';
-import { assertConcurrencyWithinLimit } from '@/lib/idempotency';
+import { assertConcurrencyWithinLimit, checkDailyQuota } from '@/lib/idempotency';
 import { estimateTokens } from '@/lib/llm/mock';
+import { LLMError } from '@/lib/llm/types';
+import { rateLimitByUser } from '@/lib/rate-limit';
 import { env } from '@/lib/env';
 
 export const runtime = 'nodejs';
@@ -22,8 +24,10 @@ export const dynamic = 'force-dynamic';
  *     「上下文怎么组织」这个提示词层面的决策下放给了客户端，
  *     一旦前端版本不一致，同一段对话会得到不同结果。
  *  2. **不重复做正文抽取**。原文已经抽过并存在父任务里，重抽一遍既慢又可能失败。
- *  3. **不需要检查每日配额与模板变量**。追问沿用父任务的模板与参数，
- *     用户没有「填参数」这一步。
+ *  3. **不需要填模板变量**：追问沿用父任务的模板与参数，用户没有「填参数」这一步。
+ *     但**成本闸门不能绕**：追问同样会真实调用模型，所以与 /api/tasks 一样
+ *     检查按用户限流、每日配额（BYOK 不占站点配额）与并发上限。
+ *     （早期版本漏了配额检查，等于给免费用户开了一条无限追问的烧钱通道。）
  *
  * ## 上下文组织方式（这是一个设计决策）
  *
@@ -37,6 +41,12 @@ export async function POST(req: Request) {
   try {
     const userId = await requireUserId();
     const e = env();
+
+    // 与新建任务共用同一个「按用户的高价值操作」限流桶：追问也会真实扣费
+    const rl = await rateLimitByUser(userId, 'task:create');
+    if (!rl.ok) {
+      return fail('RATE_LIMITED', `操作过于频繁，请 ${rl.retryAfterSec} 秒后重试`, 429);
+    }
 
     const body = (await req.json()) as {
       parentTaskId?: unknown;
@@ -71,7 +81,40 @@ export async function POST(req: Request) {
       e.MAX_CONCURRENT_TASKS_PER_USER,
     );
     if (!concurrency.ok) {
-      return fail('TOO_MANY_RUNNING', '你有任务正在处理中，请等待完成后再提问', 429);
+      throw new LLMError(
+        '你有任务正在处理中，请等待完成后再提问',
+        'TOO_MANY_RUNNING',
+        true,
+        429,
+      );
+    }
+
+    /**
+     * 每日配额闸门。
+     *
+     * BYOK 判定以父任务 params 里的 credentialId 快照为准：用自己 key 的
+     * 追问不占站点免费配额（费用由用户承担），站点 key 的追问必须计入，
+     * 否则「配额用完后无限追问」就是一条真实的成本漏洞。
+     */
+    const parentParams = (parent.params ?? {}) as Record<string, unknown>;
+    const parentUsedByok =
+      typeof parentParams.credentialId === 'string' && parentParams.credentialId.length > 0;
+    if (!parentUsedByok) {
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { dailyQuota: true },
+      });
+      const quotaLimit = user?.dailyQuota ?? e.FREE_DAILY_QUOTA;
+      const quota = await checkDailyQuota(userId, quotaLimit);
+      if (!quota.ok) {
+        throw new LLMError(
+          `今日免费额度已用完（${quota.used}/${quotaLimit}）。` +
+            '你可以到「模型设置」填入自己的 API Key，用你自己的额度继续追问。',
+          'QUOTA_EXCEEDED',
+          false,
+          429,
+        );
+      }
     }
 
     const parentType = normalizeTaskType(parent.type) ?? 'summarize';
