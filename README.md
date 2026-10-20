@@ -1,81 +1,104 @@
 # Lumenote（流光笔记）
 
-> 一个**可追溯**的 AI 文本工作台。它和「套个壳调用大模型」的区别，在于每一步都留下证据。
+> 一个**可追溯**的 AI 文本工作台：摘要 / 翻译 / 润色 / 文档问答共用同一条
+> 「Prompt 版本快照 + Token 计量 + 降级」管线。它和「套个壳调用大模型」的区别，
+> 在于每一步都留下证据，并且**每个结论都标注了验证状态**。
+
+![落地页](docs/assets/01-landing.png)
 
 ---
 
 ## 这个项目想解决什么
 
-市面上的 AI 摘要工具几乎都停在「能跑通」：结果好坏不知道、为什么这样写不知道、花了多少钱不知道。
+市面上的 AI 文本工具几乎都停在「能跑通」：结果好坏不知道、为什么这样写不知道、花了多少钱不知道。
 
 Lumenote 的每条结果都能回答三个问题：
 
 | 问题 | 答案在哪 |
 |---|---|
-| 这条摘要是怎么生成的？ | Prompt 指纹：模板名 + 版本号 + 模型名 |
-| 它可靠吗？ | 降级标记、重试轨迹、耗时与首字延迟 |
-| 花了多少钱？ | 输入/输出 token、缓存命中率、实际费用、是否高峰计价 |
+| 这条结果是怎么生成的？ | Prompt 指纹：模板名 + 版本号 + 模型 + 参数快照 |
+| 它可靠吗？ | 降级标记、重试轨迹、证据链（Agent）、耗时与首字延迟 |
+| 花了多少钱？ | 输入/输出 token、缓存命中率、峰谷计价、任务级成本 |
+
+**3 分钟演示脚本**见 [docs/demo-script.md](docs/demo-script.md)；
+**面试可讲的取舍**见 [docs/interview-guide.md](docs/interview-guide.md)。
 
 ---
 
-## 快速开始
+## 验证状态（先看这一节）
+
+> 核对于 **2026-10-20**，Node v22.15.0 / pnpm 10.33.2 / PostgreSQL 16。
+> 原则：**没跑过的验证不写成"已通过"**，只写「未运行」并给原因。
+
+| 项目 | 命令 | 本次实测结果 | 状态 |
+|---|---|---|---|
+| 单元测试 | `pnpm test` | 31 文件 / **656 测试**全部通过 | ✅ 已运行 |
+| 集成测试 | `pnpm test:integration` | 8 文件 / **23 测试**（真实 PostgreSQL + `next dev`） | ✅ 已运行 |
+| 覆盖率 | `pnpm test:coverage` | statements 40.67 / branches **82.81** / functions 72.22 / lines 40.67 | ⚠️ **未达标**：branches 低于 `vitest.config.ts` 的 83 阈值，命令退出码 1（见「已知限制」） |
+| 生产构建 | `pnpm build` | 29 条路由（`Route (app)` 表）+ `ƒ Proxy (Middleware)`；无 middleware 弃用警告 | ✅ 已运行 |
+| 端到端冒烟 | `pnpm smoke` | Mock 模式 **28 断言**全部通过（登录→建任务→SSE→幂等重放） | ✅ 已运行 |
+| 评测报告 | `MOCK_LLM=true pnpm eval:report` | Mock 模式生成 [docs/eval-report.md](docs/eval-report.md) | ✅ 已运行（**不代表真实模型质量**） |
+| standalone 产物 | `verify-standalone.mjs` | 按镜像布局 `node server.js`，**20/20** 断言，`/api/health` 200 且 `db.ok=true` | ✅ 已运行 |
+| Docker 构建/编排 | `docker build` / `docker compose` | — | ❌ **未运行**（本机未安装 Docker；仅 PyYAML 静态校验 51/51） |
+| 真实 Redis 限流 | `pnpm test:redis` | `SKIPPED`（退出码 2 = 未验证） | ❌ 未运行（本机无 Redis；CI job 从未在 GitHub 跑过） |
+| GitHub Actions | — | 仓库还没有 remote | ❌ 未运行（只用 actionlint 1.7.12 + PyYAML 校验过 YAML） |
+| 真实模型评测 | `pnpm eval:report`（MOCK_LLM=false） | — | ❌ 未运行（无 Key、明确零费用；judge 未校准） |
+
+> 为什么把这张表放最前面：这个项目最值得讲的是「**区分已验证与未验证**」的工程习惯。
+> 面试时被问「Docker 跑过吗」，正确回答是「没有，只有 standalone 等价验证」——不是「应该可以」。
+
+**截图均为真实运行截图**（Mock 模式 dev server + 系统 Chrome 渲染，非设计稿）：
+生成脚本 [scripts/demo/capture-screenshots.mjs](scripts/demo/capture-screenshots.mjs)，
+用 Playwright 驱动已安装的 Chrome（本机 Playwright 自带 Chromium 下载不可达，改用系统浏览器）。
+复现时注意 dev server 要绑 `127.0.0.1`（`pnpm dev -- -H 127.0.0.1`），否则 Next 会拦截跨 origin 的
+dev 资源导致 hydration 失败；脚本只截 Mock 输出，并会校验页面里出现「Mock 模式」标记后才继续。
+
+---
+
+## 快速开始（Mock 模式，不需要 API Key）
 
 ```bash
-# 1. 安装依赖
-pnpm install
+# 1. 依赖（不要随意改 lockfile）
+corepack enable
+pnpm install --frozen-lockfile
 
-# 2. 起数据库（Postgres 16 + Redis）
-docker compose up -d
+# 2. 数据库：有 Docker 时起 Postgres + Redis
+docker compose up -d postgres redis
+#    没有 Docker 时：保证本机 PostgreSQL 16 监听 127.0.0.1:5432，
+#    scripts/dev.mjs 会通过 PGHOME / PG* 环境变量找到它（见 docs/demo-script.md §5）
 
-# 3. 配环境变量
+# 3. 环境变量（.env.example 默认 MOCK_LLM="true"，无需任何 Key 即可完整演示）
 cp .env.example .env.local
-# 至少要改：AUTH_SECRET（openssl rand -base64 32）
+#    至少要改 AUTH_SECRET：openssl rand -base64 32
 
-# 4. 建表 + 写入内置模板
-pnpm prisma:migrate
-pnpm prisma:seed
+# 4. 迁移 + 演示数据（幂等，可重复执行）
+pnpm prisma:deploy       # 生产/本地应用迁移；不要用 prisma:migrate（开发期交互式迁移）
+pnpm prisma:seed         # 内置 Prompt 模板 + 演示账号 demo@lumenote.dev / Lumenote2026!
 
-# 5. 起服务
-pnpm dev
+# 5. 启动
+pnpm dev                 # http://localhost:3000
 ```
 
-打开 http://localhost:3000，注册账号后即可使用。
+登录演示账号后即可体验全部能力；Mock 模式的输出顶部会明确标注
+「这是 **Mock 模式**输出，未调用真实模型」——不伪装成真实结果。
 
-**想先不花钱看效果？** 把 `.env.local` 里 `MOCK_LLM` 设为 `true`，
-会走本地模拟流式输出，完整走通全链路但不调用真实模型。
-
-**想用自己的 API Key？** 别再改 `.env.local` —— 登录后进「模型设置」填入即可，
-密钥加密存储、只回掩码，并且不占站点免费配额。见下方「用自己的 API Key（BYOK）」。
-
-> ⚠️ 修改了 `prisma/seed.ts` 里的 Prompt 模板后需要**重跑 `pnpm prisma:seed`**：
-> 内置模板存放在数据库里，不是代码里的常量。v1 版本会被原地更新。
+- **想用真实模型**：`.env.local` 里设 `MOCK_LLM="false"` 并配置 `DEEPSEEK_API_KEY`；
+  或登录后在「模型设置」填入自己的 Key（BYOK，不占站点配额）。
+- **改了 `prisma/seed.ts` 的 Prompt 模板**：必须重跑 `pnpm prisma:seed` ——
+  模板在数据库里，不是代码常量；历史任务引用的是具体版本行。
 
 ---
 
 ## 技术栈
 
 - **框架**：Next.js 16（App Router）+ React 19 + TypeScript strict
+- **数据**：Prisma 7 + PostgreSQL 16
 - **样式**：Tailwind CSS 3.4（CSS 变量驱动，支持暗色）
-- **数据**：Prisma 7 + PostgreSQL
-- **模型接入**：AI SDK 7 + `@ai-sdk/openai-compatible`（DeepSeek 主 / OpenAI 备）
-- **鉴权**：自建 JWT（access 15min + refresh 7天轮换）+ bcrypt + 邮箱验证码
-- **测试**：Vitest 2（173 单测 + 2 个接口层验收脚本）
-
----
-
-## 首页与视觉
-
-落地页刻意**不写营销形容词**（「智能」「高效」「强大」），而是把可验证的东西摆出来：
-真实字段的产品预览卡（Token 明细 / 缓存命中率 / 成本 / 降级标记）、
-六项能力清单、与「套壳调用」的逐条对照表、安全措施表。
-
-几个实现上的取舍：
-
-- **渐变只用两处**（主标题的一个短语 + 背景光斑）。到处发光是廉价感的来源。
-- **不引动画库**：入场动画是十几行 CSS `@keyframes`，为一次淡入加 40KB 依赖不划算。
-- **产品预览的数字来自真实计价表**（`import { PRICING }`）而不是手写，避免「写完就过期」。
-- **对照表在窄屏换成卡片**：390px 宽下三列表格会把中文压成「每行两三个字」的竖排。
-- 尊重 `prefers-reduced-motion`（无障碍要求，不是可选项）。
+- **模型接入**：AI SDK 7 + `@ai-sdk/openai-compatible`（DeepSeek 主 / OpenAI 备 / 本地 Mock）
+- **鉴权**：自建 JWT（access 15min + refresh 7 天轮换）+ bcrypt + 邮箱验证码
+- **限流**：store 抽象，`memory`（默认）/ `redis`（多实例共享）
+- **可观测性**：OpenTelemetry tracing（JSONL / OTLP exporter）+ 数据库指标聚合
+- **测试**：Vitest 2（31 文件 / 656 单测）+ 真实 Postgres 集成测试（8 文件 / 23 测试）+ Playwright 截图脚本
 
 ---
 
@@ -84,23 +107,22 @@ pnpm dev
 ### 两段式流式（核心设计）
 
 ```
-POST /api/tasks        →  立即返回 taskId（< 200ms），after() 异步跑管线
-GET  /api/tasks/:id/stream  →  SSE 订阅输出，可断线重连
+POST /api/tasks             →  立即返回 taskId（实测 < 200ms），after() 异步跑管线
+GET  /api/tasks/:id/stream  →  SSE 订阅输出，可断线重连（Last-Event-ID）
 ```
 
-**为什么不做一个请求流式返回？**
+**为什么不做一个请求流式返回？** Serverless 有执行时长上限，长文 Map-Reduce 可能跑几分钟；
+更关键的是**断线可重连** —— 内容与状态在数据库里，服务重启也不丢。
 
-Serverless 有执行时长上限，长文的 Map-Reduce 可能跑几分钟，单请求撑不住。
-更关键的是**断线可重连** —— 内容在数据库里而非内存里，服务重启也不丢。
+⚠️ `after()` **不是队列**：没有持久化、重试、租约、死信；崩溃会留下 `running` 任务。
+单实例常驻下可用，Serverless 只适合短任务，多实例需要外部队列。完整边界见
+[docs/adr/0005-async-execution-boundary.md](docs/adr/0005-async-execution-boundary.md)。
 
-实现细节见 `src/lib/sse.ts`（五事件协议 + 15s 心跳 + 防缓冲头）、
-`src/lib/sse-client.ts`（自研 SSE 客户端，因为原生 EventSource 不支持自定义头与 AbortSignal）。
+### 一张图看全
 
-### Map-Reduce 长文摘要
+![SSE 流式输出](docs/assets/04-streaming.png)
 
-超过阈值自动分块（段落 → 句子 → 硬切三级切分），
-Map 阶段并发处理但不推流，Reduce 阶段流式输出给用户。
-分工的理由：Map 的中间产物用户不需要看，推给他只会造成噪音。
+（完整系统架构图、时序图、Agent 状态机、ER 图见 [docs/architecture.md](docs/architecture.md) 的 §九–§十二。）
 
 ### 可靠性四层
 
@@ -109,202 +131,65 @@ Map 阶段并发处理但不推流，Reduce 阶段流式输出给用户。
 ```
 
 降级链：`deepseek-flash` → `deepseek-v4-pro` → `openai` → 本地启发式摘要。
-**降级产出的结果会被明确标记**，不伪装成正常输出。
+**降级产出的结果会被明确标记（`degraded=true`）**，不伪装成正常输出。
+熔断器是**进程内存**实现，多实例不共享（已知限制）。
+
+### Agent：控制权在代码
+
+- 状态机由代码驱动：`plan → act → observe → finalize / give_up`；
+- 双预算（步数 + token）、单工具额度、重复调用检测（第 3 次强制收敛）；
+- **工具全部只读**（Prompt 注入的真正防线）；
+- 结论必须带 `chunk:N` 证据，`checkEvidence()` 做确定性校验（引文是否真在分块里）。
+
+![Agent 结论与证据链](docs/assets/07-agent-evidence.png)
 
 ---
 
-## 能力：一个工作台，五件事
+## 能力：一个工作台
 
 所有能力**共用同一条可靠性与计量管线** —— 加一种能力只需在
-[types.ts](lumenote/src/lib/tasks/types.ts) 加一条定义 + 在 seed 里加模板，
+[src/lib/tasks/types.ts](src/lib/tasks/types.ts) 加一条定义 + 在 seed 里加模板，
 工作台 UI、路由、计量都不用改。
 
 | 能力 | 分块 | 说明 |
 |---|---|---|
-| 长文摘要 | ✅ Map-Reduce | 超长文档自动分块、逐块摘要、合并去重 |
-| 翻译 | ❌ 整篇 | 带术语表强制统一译法。**刻意不分块**：切开后人称、语气、术语会前后不一致，且合并阶段无法恢复被切断的语义 |
+| 长文摘要 | ✅ Map-Reduce | 超长文档自动分块、逐块摘要、合并；Map 阶段不推流，Reduce 流式输出 |
+| 翻译 | ❌ 整篇 | 带术语表强制统一译法。**刻意不分块**：切开后人称、语气、术语会前后不一致 |
 | 润色改写 | ❌ 整篇 | 三档强度 + 目标风格，保持原意与段落结构 |
-| 结果追问 | ❌ | 基于已生成结果继续提问，以父子任务关联（`parentTaskId`），可多轮 |
+| 文档问答（Agent） | 工具检索 | 自主检索文档并给出带证据引用的结论；Mock 模式不支持工具（见已知限制） |
+| 结果追问 | ❌ | 基于已生成结果继续提问，父子任务关联（`parentTaskId`），可多轮 |
 | 版本对比 | — | 任意两条记录的逐行 diff + 参数差异 |
 | 只读分享 | — | 不可枚举 token，只分享结果不分享输入 |
-| Markdown 导出 / 复制 | — | 剪贴板 API 降级 + Blob 下载 |
+| 成本与用量 | — | 任务级 token / 缓存命中 / 峰谷 / 成本 |
 
 ### 版本对比（Diff）
 
-```
-GET /api/diff?a=<taskId>&b=<taskId>
-```
+![版本对比](docs/assets/08-version-diff.png)
 
-- **接受任意两个 taskId** 而不是只允许「同源任务」：真实需求里经常要对比
-  不同参数（要点式 vs 段落式）甚至不同能力的结果。是否同源只作为提示（`sameSource`）
-- **两次都要走 `authzTask`** —— 只校验其中一个是个典型疏漏：拿自己的当 a、
-  别人的当 b 就能读到别人的输出
-- 除了内容 diff 还给出**参数差异**：用户看到内容不同时，下一件想知道的就是
-  「两次哪里不一样」（换了模型？改了要点数？），让他自己去翻记录猜是不合格的
-- 自研 LCS（`lib/tasks/diff.ts`）而不是引库，为的是**能控制性能上限**：
-  行数之积超过 10^6 时退化为「整体替换」并标 `truncated`，
-  而不是让一个超大输入把服务端 CPU 打满
-- 逐行而不是逐字符：字符级 diff 在中文上噪声太大（改一个字牵动整段对齐），
-  逐行更贴近用户心智——「这一条被改了」
+- **接受任意两个 taskId**：真实需求里经常对比不同参数（要点式 vs 段落式）甚至不同能力的结果；
+- **两次都走 `authzTask`**：只校验一个是典型疏漏（拿自己的当 a、别人的当 b 就能读别人输出）；
+- 除内容 diff 外给出**参数差异**（换了模型？改了要点数？）；
+- 自研 LCS（[src/lib/tasks/diff.ts](src/lib/tasks/diff.ts)），行数积超过 10^6 时退化为整体替换并标 `truncated`。
 
 ### 追问对话链
 
 ```
-POST /api/followup            { parentTaskId, question }  → 新建追问子任务
-GET  /api/followup?taskId=...                               → 直接子任务列表
-GET  /api/followup?taskId=...&whole=1                       → 整条对话链
-页面 /history/[id]                                          → 完整链路视图
+POST /api/followup   { parentTaskId, question }  → 新建追问子任务
+GET  /api/followup?taskId=...                    → 直接子任务列表
+GET  /api/followup?taskId=...&whole=1            → 整条对话链
 ```
 
-- **向上找根再从根展开**：入口可能来自链上任意一环（用户点开第三次追问，
-  也该看到完整对话，而不是只剩后半段）
-- 展开用**逐层 BFS** 而不是只查一层。第一版只查了一层，结果是「追问的追问」
-  **静默消失**——用户问了三轮只看到两轮，还不报错。这类丢数据比报错糟糕得多
-- 链会增长，所以独立页面在追问后**就地流式显示**新回答（复用 SSE 订阅），
-  而不是让用户刷新整页——否则会失去「我正在跟这条链对话」的连续感
-- 上下文只带「上一轮结果 + 本轮问题」，不带完整历史：
-  输出价约为输入的 4 倍，全量历史会让成本随轮次线性增长
+- 向上找根再从根展开（入口可能来自链上任意一环）；
+- 展开用**逐层 BFS** 而不是只查一层 —— 只查一层会让「追问的追问」静默消失；
+- 上下文只带「上一轮结果 + 本轮问题」，避免成本随轮次线性增长。
 
-### 术语表
+### 只读分享 / 术语表 / 登录活动
 
-通用翻译模型对同一术语可能给出不同译法（`token` 一会儿「令牌」一会儿「标记」），
-对技术文档是硬伤。术语表把约定显式写进 prompt：
-
-- 创建任务时**快照进 `Task.params.glossary`**，之后改术语表不影响历史任务 ——
-  否则「同一条记录重跑得到不同结果」，可追溯性就无从谈起
-- 空领域归一化为 `null`（而不是空串），否则领域过滤的 `OR` 会漏掉一批
-- 上限 60 条：术语会进每一条翻译请求，太多会挤占正文预算
-
-### 只读分享
-
-```
-POST   /api/share   { taskId }        → 生成/复用链接（一个任务一条）
-DELETE /api/share?taskId=...          → 撤销
-GET    /share/:token                  → 匿名可访问
-```
-
-- token 是 32 字节密码学随机数（base64url），**不可枚举** —— 可枚举等于公开所有人的内容
-- 有效性判断抽成纯函数 `checkShareLink()`，四条约束缺一不可：
-  未撤销、未过期、**所属任务未被软删**（否则「删除」是假动作）
-- 任何一条不满足统一返回 404，不区分原因（避免探测 token 是否曾经有效）
-- 分享页**只展示结果，不展示输入正文** —— 原文可能是内部文档或未发布稿件
-- `expiresAt = null` 表示永不过期；判断时必须显式判 null，
-  写成 `expiresAt < now` 会把 null 隐式转成 0，反而判成「早已过期」
-
-### 登录活动（用户自查）
-
-给用户看的安全事件面板：时间 + IP + 设备三者并列，异常记录配色区分。
-定位是**用户自查工具**而不是运维审计 —— 账号被盗时，用户是唯一能发现
-「这条记录不该是我」的人（运维不知道用户的作息与所在地）。
-
-配套「活跃会话」列表与踢出动作：改密码只能阻止未来的登录，
-**已登录的会话必须显式销毁**，这是被盗后最有效的自救动作。
-
----
-
-## 注册与登录安全
-
-### 注册需要邮箱验证码
-
-```
-POST /api/auth/verification   →  发送验证码（同邮箱 60 秒冷却 + 每小时 5 次上限）
-POST /api/auth/register       →  带 code 完成注册，直接签发会话
-```
-
-| 关注点 | 做法 |
-|---|---|
-| 存储 | 只存 `sha256(code + AUTH_SECRET)`，**不存明文** —— 数据库泄露也拿不到可用验证码 |
-| 有效期 | 10 分钟，过期即废 |
-| 防爆破 | 校验失败累计 5 次即作废，必须重新获取（6 位数字仅 100 万种组合，不限次等于敞开） |
-| 防重放 | 用后即焚（写 `consumedAt`），且显式区分 `purpose` |
-| 防囤积 | 发新码时作废同邮箱同用途的旧码，任一时刻至多一个有效码 |
-| 防轰炸 | 同邮箱 60 秒冷却 + 每小时 5 次；按邮箱维度而非 IP（换 IP 绕不过去） |
-| **防账号枚举** | 邮箱已注册时**返回与成功完全一致的响应**（连开发环境的 `devCode` 都返回一个诱饵码）—— 否则响应差异本身就是枚举信号 |
-
-### 登录不需要验证码，但有三层防护
-
-| 层 | 拦什么 | 存储 |
-|---|---|---|
-| 限流 | 请求太**频繁**（脚本刷接口） | 内存 |
-| 失败锁定 | 密码猜错太**多**次（慢速撞库 / 密码喷洒） | **数据库**（多实例一致） |
-| 安全事件审计 | 事后可查「谁在什么时候从哪个 IP 试过」 | 数据库 |
-
-几个刻意的取舍：
-
-- **锁定必须落库**。限流放内存可以接受（它只是防意外刷爆），但锁定是安全属性 ——
-  5 个实例各算 5 次失败，攻击者实际得到 25 次机会。
-- **IP 阈值是账号阈值的 3 倍**。公司/学校共用出口 IP，阈值相同会让同事输错几次就锁住整个办公室。
-- **锁定判定在查用户之前，且两个分支返回同一响应**。「被锁」本身不能成为「账号存在」的信号。
-- **`还可尝试 N 次` 只出现在「账号存在且密码错」分支**，不存在的账号始终是通用文案。
-
-### 邮件通道（可插拔）
-
-```bash
-MAIL_TRANSPORT=console   # 默认：不发信，验证码打到日志并在非生产环境自动填入页面
-MAIL_TRANSPORT=resend    # 真发信，只需 RESEND_API_KEY
-MAIL_TRANSPORT=smtp      # 尚未接入（返回明确错误而不是静默失败）
-```
-
-> ⚠️ 生产环境用 `console` 用户会收不到验证码 —— 代码**硬性拒绝**在生产环境把验证码
-> 回传给客户端（否则验证环节等于不存在）。上线前必须换成 `resend`。
-
-### 密码强度
-
-前后端两套，职责不同：
-
-- `validatePasswordStrength`（**准入底线**，服务端强制）：长度 8–128、需含字母、需含数字或符号
-- `assessPasswordStrength`（**强度分级**，前端实时 5 档强度条 + 可操作建议）
-
-刻意**不因为强度低就拒绝注册**（那会劝退用户），但界面上明确提示。
-未引入 zxcvbn 的理由见 [password-strength.ts](lumenote/src/lib/password-strength.ts) 顶部注释。
-
----
-
-## 安全设计
-
-| 风险 | 防御 |
-|---|---|
-| **IDOR 越权** | `authzTask` 等统一入口，SQL 层就带 `userId` 过滤；查不到返回 404 而非 403 |
-| **SSRF** | 协议/端口/白名单/DNS 解析后私网 IP 四层校验，**连接层固定已校验 IP**（undici 自定义 lookup），重定向逐跳复验，云元数据地址硬编码拦截 |
-| **Prompt 注入** | 分隔符包裹 + 中和用户自带的结束标签 + 输出侧正则脱敏 + LLM 工具全只读 |
-| **重复计费** | `Idempotency-Key` + `Task @@unique([userId, idempotencyKey])` 双保险 |
-| **邮箱枚举** | 统一错误文案 + **真实 cost-12 哈希**的假 bcrypt 比对消除时间差 + 发码接口响应完全一致 |
-| **账号爆破** | 限流 + 失败锁定（落库）+ 安全事件审计 |
-| **Token 失效** | refresh token 服务端轮换，登出即销毁 session（不只是清 cookie） |
-| **用户 API Key 泄露** | AES-256-GCM 加密落库（密钥派生自 `AUTH_SECRET`），接口只回掩码，密文也不出服务端 |
-| **开放重定向** | 登录后的 `next` 参数用 URL 解析比 origin，挡住 `//evil.com` 与 `/\evil.com`（反斜杠等价于斜杠） |
-
-> ⚠️ 诚实说明：**prompt 注入没有彻底解法**。护栏只降低概率，
-> 真正的防线是不给模型写权限的工具，以及数据隔离。见 `src/lib/llm/guardrail.ts` 顶部注释。
->
-> 同样的诚实适用于 DNS 固定：它在**单实例内**有效。多实例部署下熔断器与限流仍是各算各的（见「已知限制」）。
-
----
-
-## 用自己的 API Key（BYOK）
-
-工作台 →「模型设置」可以填入自己的模型 API Key，用**自己的额度**生成摘要。
-
-| 关注点 | 做法 |
-|---|---|
-| 密钥存储 | AES-256-GCM 密文，密钥由 `AUTH_SECRET` 经 scrypt 派生；**不存明文** |
-| 密钥读取 | 任何接口都只返回掩码（`sk-…a1b2`）；连密文都不回传前端 |
-| 任务追溯 | 任务里只记录 `credentialId`，**绝不把密钥写进任务参数或日志** |
-| 自定义端点 | 允许中转网关，但内网/环回/云元数据地址一律拦截；非本机必须 https |
-| 失败行为 | 用户凭证失败时**不会静默改用站点 key** —— 明确标记「降级结果」并说明原因，避免产生用户不知情的费用 |
-| 配额 | 用自己的 key 不占站点免费配额；但**并发上限仍生效**，因为它保护的是用户自己的钱包 |
-
-两个部署开关（见 `.env.example`）：
-
-- `ALLOW_USER_CREDENTIALS=false` —— 整站关闭该功能（接口 403，界面无入口）
-- `ALLOW_CUSTOM_BASE_URL=false` —— 只允许内置服务商的官方地址
-
-验收脚本（不产生真实模型调用）：
-
-```bash
-pnpm dev
-node scripts/verify-byok.e2e.mjs        # 51 项断言：CRUD / 越权 / 泄露 / 管线联通
-```
+- **只读分享**：32 字节密码学随机 token（不可枚举）；未撤销 + 未过期 + 任务未软删，四条约束缺一不可；
+  分享页**只展示结果不展示输入正文**；
+- **术语表**：创建任务时快照进 `Task.params.glossary`，改术语表不影响历史任务（否则不可追溯）；
+- **登录活动**：用户自查工具（时间 + IP + 设备），配套活跃会话列表与踢出 ——
+  改密码只能阻止未来登录，已登录会话必须显式销毁。
 
 ---
 
@@ -316,138 +201,277 @@ DeepSeek 的定价有三个维度，缺一不可：
 2. **峰谷分时**：高峰为低谷的 **2 倍**
 3. **输入输出不同价**：输出约为输入 miss 的 **4 倍**
 
-因此 `render.ts` 把**稳定内容前置**以命中前缀缓存 —— 这个顺序不是风格问题，
-是直接决定成本的。缓存优化的收益（50×）远大于躲高峰（2×），结论写在代码注释里避免后来人搞反。
+因此 `render.ts` 把**稳定内容前置**以命中前缀缓存 —— 这个顺序直接决定成本，
+不是风格问题。计价逻辑见 [src/lib/llm/pricing.ts](src/lib/llm/pricing.ts)
+（含峰谷判定与中国法定节假日表，核对日期 2026-10-11）。
 
-计价逻辑见 `src/lib/llm/pricing.ts`，含峰谷判定与中国法定节假日表（**核对日期 2026-10-11**）。
-
----
-
-## Non-goals（明确不做的事）
-
-写清楚边界比堆功能更重要：
-
-- **不做多用户协作** —— 单用户工具，共享只到「只读分享链接」这一层
-- **不做向量检索 / RAG** —— `KnowledgeChunk` 表预留了 pgvector 字段，但本期不实现检索
-- **不做移动端 App** —— Web 响应式够用
-- **不做自建 LLM 网关** —— 用 AI SDK 的 Provider 抽象，不重复造轮子
-- **不做实时协同编辑** —— 与核心定位（可追溯的单次生成）无关
+除了计价，还有三道成本闸门：**幂等键**（防重复扣费）、**每日配额**、**并发上限**。
+已知限制：配额是「先查后写」，并发提交理论上可绕过，靠并发上限与限流把窗口压小。
 
 ---
 
-## 已知限制
+## 安全设计
 
-1. **`after()` 仍有平台超时上限**。极长文档在 Serverless 上可能跑到一半被终止。
-   生产环境的正确做法是迁移到外部 Worker（Trigger.dev / QStash）。
-2. **熔断器状态在内存中**，Serverless 多实例下不共享。
-   单实例部署没问题，多实例需换成 Redis。
-3. **限流同样是内存实现**，多实例下每个实例各算各的，实际阈值会放大 N 倍。
-4. **未做集成测试**。涉及数据库的逻辑（幂等、越权、配额）目前靠手工验收。
-   这是刻意的取舍：集成测试需要起 DB 服务，会让单测失去毫秒级反馈的价值。
-   接口层的验收由 `scripts/verify-byok.e2e.mjs` 这类脚本覆盖。
-5. **更换 `AUTH_SECRET` 会导致已保存的用户 API Key 全部无法解密**（用户需在设置页重填）。
-   这是加密存储的必然结果：密钥必须来自服务端，不能与密文存在同一处。
-   解密失败时管线会退回站点通道出结果而不是直接报错，用户在设置页能看到失败记录。
-6. **每日配额是「先查后写」**，并发提交理论上可以绕过（同一用户同时提交多个任务时，
-   检查时都看到同样的计数）。当前靠并发上限 + 限流把窗口压到很小；
-   彻底修法是把「检查 + 插入」放进一个 `Serializable` 事务或加用户级咨询锁。
+| 风险 | 防御 |
+|---|---|
+| **IDOR 越权** | `authzTask` 等统一入口，SQL 层带 `userId` 过滤；查不到返回 404 而非 403 |
+| **SSRF** | 协议/端口/白名单/DNS 解析后私网 IP 四层校验，**连接层固定已校验 IP**，重定向逐跳复验，云元数据地址硬编码拦截 |
+| **Prompt 注入** | 分隔符包裹 + 中和结束标签 + 输出侧脱敏 + **LLM 工具全只读** |
+| **重复计费** | `Idempotency-Key` + `Task @@unique([userId, idempotencyKey])` 双保险；`UsageLog.taskId @unique` 一次结算 |
+| **邮箱枚举** | 统一错误文案 + 真实 cost-12 哈希的假 bcrypt 比对消除时间差 + 发码接口响应完全一致 |
+| **账号爆破** | 限流（memory/redis）+ 失败锁定（落库，多实例一致）+ 安全事件审计 |
+| **Token 失效** | refresh token 服务端轮换，登出即销毁 session（不只是清 cookie） |
+| **用户 API Key 泄露** | AES-256-GCM 加密落库（密钥派生自 `AUTH_SECRET`），接口只回掩码 |
+| **开放重定向** | 登录后 `next` 参数用 URL 解析比 origin，挡住 `//evil.com` 与 `/\evil.com` |
+
+### 安全边界（必须诚实）
+
+- **`proxy.ts` 不是安全边界**：它只做「cookie 是否存在」的乐观检查，
+  真正的鉴权在每个 API 路由（`requireUserId` → 验签 → 查 DB）。Next 16 起
+  `middleware` 文件约定被 `proxy` 取代，且 Proxy 固定跑 Node runtime；
+- **CSP 目前是 Report-Only**：`script-src` 含 `unsafe-inline`、无 nonce；
+  HSTS 仅生产发送且依赖反代终止 TLS；
+- **限流 IP 来自 `TRUST_PROXY_HOPS`**：默认 0 不信任 `X-Forwarded-For`
+  （防伪造，但所有请求共享 `unknown` 桶）；部署在反代后必须按层数配置，
+  且应用端口只对代理开放；配错的表现是「别人请求多了你也 429」；
+- **熔断器仍是进程内存**，多实例不共享（限流已可 Redis 共享）。
+
+> ⚠️ prompt 注入没有彻底解法。护栏只降低概率，真正的防线是不给模型写权限的工具与数据隔离。
+> 本项目**不是安全审计**，以上只是工程取舍。
 
 ---
 
-## DeepSeek 能力约束
+## 移动端与可访问性（静态检查，未做真实设备验证）
 
-实现前实查了官方文档（**核对日期 2026-10-11**），几个关键约束：
+只做了**读代码级**的静态检查，没有用真实移动设备、屏幕阅读器或 Lighthouse 验证过。
+以下结论都按「看到什么写什么」记录，不把静态检查说成无障碍达标。
 
-- **模型已换代**：`deepseek-flash`（V4.1-Flash）与 `deepseek-v4-pro`，
-  旧的 `deepseek-chat` / `deepseek-reasoner` 已下线
-- **thinking 默认开启**，effort 默认 high；
-  thinking 下 `temperature` / `presence_penalty` / `frequency_penalty` **静默忽略**
-  （写上去不报错，但完全不生效 —— 这种静默失效最难发现）
-- **`top_p` 仅 thinking 生效**，且范围仅 0.95–1.0
-- **Tool Calls**：带 tools 的请求后续每轮必须回传 `reasoning_content`，否则 API 返 400
-- **JSON Output**：prompt 需含 "json" 字样，且可能偶发空 content
+**已有的**：
 
-详见 `docs/adr/0003-deepseek-capability-constraints.md`。
+- 错误提示统一 `role="alert"`（登录表单、历史、设置、安全活动、成本页等 6 处）；
+- 两个弹窗（历史详情 / 版本对比）都有 `role="dialog" + aria-modal="true"` 与「关闭」按钮；
+- Tabs 组件有 `role="tablist" / tab / tabpanel` 与 `aria-selected`；
+- 交互元素使用 `focus-visible:ring`（4 个 UI 基础组件），键盘焦点可见；
+- 响应式：落地页与网格布局使用 `sm:/md:/lg:` 断点（窄屏下三列表格会换成卡片，理由见代码注释）；
+- `prefers-reduced-motion: reduce` 下入场动画降级（`globals.css`）；
+- Agent 时间线用原生 `<details>/<summary>`，自带键盘可达性与无障碍语义。
+
+**发现的缺口（均为静态阅读结论，本轮未改 `src/**`）**：
+
+1. 工作台的主输入框只有 `placeholder`、没有 `<label>`/`aria-label` —— 占位文本不是可访问名称，
+   读屏用户不知道这个多行输入框叫什么；
+2. 工作台顶部的「长文摘要 / 翻译 / 润色改写 / 文档问答」是一排普通按钮，
+   没有 `role="tablist"` / `aria-selected` / `aria-pressed`，视觉上像标签页但语义不是；
+3. SSE 流式输出没有 `aria-live` 区域，读屏用户不会被告知内容在增长；
+4. 配色对比度没有做量化检查；`text-muted-foreground` 在部分浅色底上的对比度需要实测确认；
+5. 只截了 1440×900 的桌面截图，**没有做 390px 移动端仿真/真机验证**。
+
+这些属于 `src/**` 改动（本轮范围外），已作为变更请求交给 Lead，而不是在文档里假装已达标。
+
+---
+
+## 用自己的 API Key（BYOK）
+
+工作台 →「模型设置」可以填入自己的模型 API Key，用**自己的额度**生成内容。
+
+| 关注点 | 做法 |
+|---|---|
+| 密钥存储 | AES-256-GCM 密文，密钥由 `AUTH_SECRET` 经 scrypt 派生；不存明文 |
+| 密钥读取 | 接口只返回掩码（`sk-…a1b2`）；密文也不回传前端 |
+| 任务追溯 | 任务只记录 `credentialId`，绝不把密钥写进任务参数或日志 |
+| 自定义端点 | 允许中转网关，但内网/环回/云元数据地址一律拦截；非本机必须 https |
+| 失败行为 | 用户凭证失败时**不会静默改用站点 Key** —— 明确标记降级并说明原因 |
+| 配额 | 用自己的 Key 不占站点免费配额；但**并发上限仍生效**（保护用户自己的钱包） |
+
+验收脚本（不产生真实模型调用，需先 `pnpm dev`）：
+
+```bash
+node scripts/verify/byok.e2e.mjs
+```
 
 ---
 
 ## 测试与质量
 
-```bash
-pnpm check     # typecheck + lint + test 一起跑
-pnpm test      # 232 个单测
+| 命令 | 做什么 | 环境要求 | 本次是否运行 |
+|---|---|---|---|
+| `pnpm test` | 单元测试（纯逻辑，不连库/不联网） | 无 | ✅ 656 全过 |
+| `pnpm test:integration` | 真实 Postgres + 真实 HTTP 集成测试 | PostgreSQL 16 测试库；**先停掉 dev server**（Next 16 每项目只允许一个 dev server） | ✅ 23 全过 |
+| `pnpm test:coverage` | 单测 + 覆盖率（只统计 `src/lib/**`） | 无 | ⚠️ branches 82.81% < 阈值 83%，退出码 1 |
+| `pnpm test:redis` | 真实 Redis 限流验证（Lua 原子性 / TTL） | 可达 Redis | ❌ SKIPPED（退出码 2 = 未验证） |
+| `pnpm smoke` | 端到端冒烟：登录→建任务→轮询→SSE→幂等重放 | PostgreSQL；自动起 dev server（3200） | ✅ 28 断言 |
+| `MOCK_LLM=true pnpm eval:report` | 生成评测报告 + trace | PostgreSQL | ✅ 仅 Mock 模式 |
+| `node scripts/docker/verify-standalone.mjs` | standalone 产物按镜像布局验证 | 先 `BUILD_STANDALONE=true pnpm build` | ✅ 20/20 |
+| `pnpm check` | typecheck + lint + test | 无 | ✅ |
+| `pnpm verify:all` | prisma validate + typecheck + lint + test + build | 无 | ✅ |
 
-# 接口层端到端验收（需先 pnpm dev）
-npx tsx scripts/verify/topup-quota.ts   # 先把演示账号配额调高，否则跑几轮就撞 QUOTA_EXCEEDED
-node scripts/verify/features.e2e.mjs    # 分享/追问/版本对比/术语表/登录活动（64 项）
-node scripts/verify/byok.e2e.mjs        # BYOK：CRUD / 越权 / 密钥不泄露 / 管线联通（51 项）
+接口层验收脚本（需先 `pnpm dev`，均为 Mock/开发环境）：
+
+```bash
+node scripts/verify/features.e2e.mjs   # 分享/追问/版本对比/术语表/登录活动
+node scripts/verify/byok.e2e.mjs       # BYOK：CRUD / 越权 / 密钥不泄露 / 管线联通
 npx tsx scripts/verify/auth-seed.ts > scripts/verify/.auth-seed.json
-node scripts/verify/auth.e2e.mjs        # 认证：验证码 / 防重放 / 枚举防护 / 锁定（20 项）
+node scripts/verify/auth.e2e.mjs       # 认证：验证码 / 防重放 / 枚举防护 / 锁定
 ```
 
-> ⚠️ 三个已知的「测试环境坑」，遇到时先怀疑它们而不是代码：
->
-> 1. **每日配额会被跑光**。验收会真实调用模型（这正是它的价值），
->    默认 20 次/天跑几轮就没了，后续请求全部 500/429。
->    先跑 `topup-quota.ts`。
-> 2. **注册与发码共用「单 IP 5 次 / 5 分钟」的限流桶**，连续重跑会撞限流。
->    限流状态在进程内存里，**重启 dev server 即清空**。
-> 3. **这些脚本依赖 `MAIL_TRANSPORT=console` 回传 `devCode` 来注册账号**，
->    所以只在非生产环境可用（生产环境代码会硬性拒绝回传验证码）。
+> 三个已知的「测试环境坑」：
+> 1. **每日配额会被跑光** —— 验收会真实创建任务，先用 `npx tsx scripts/verify/topup-quota.ts` 调高配额；
+> 2. **注册/发码共用单 IP 限流桶** —— 连续重跑会撞限流，重启 dev server 即清空（内存 driver）；
+> 3. **这些脚本依赖 `MAIL_TRANSPORT=console` 回传 `devCode`**，只在非生产环境可用。
 
-单测覆盖的是**纯逻辑且容易算错**的部分：
-分块边界（丢内容）、计价分档（算错不报错）、SSRF 私网判定（等价写法绕过）、
-护栏脱敏（正则 lastIndex 状态）、退避抖动（惊群）、模板渲染（默认值回落）、
-Markdown 解析（流式半成品、链接安全）、凭证加解密与地址校验、
-HTML 链接抽取（相对链接补齐、实体解码顺序）、密码强度分级。
+### 测试抓住了什么（真实 bug）
 
-还有一类是**运行环境**测试（`tests/ssr-safety.test.tsx`）：
-在无 `window` 的环境里真的渲染一次客户端组件。
-`tsc` 与 ESLint 都不做运行环境检查，所以「客户端组件在服务端读了 window」
-这类错误只有渲染一次才会暴露 —— 这个测试就是那次渲染。
+单测覆盖的是「纯逻辑且容易算错」的部分：分块边界（丢内容）、计价分档（算错不报错）、
+SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` 状态）、退避抖动（惊群）、
+模板渲染（默认值回落）、Markdown 解析（流式半成品、链接安全）、凭证加解密与地址校验、
+限流 store 与客户端 IP 解析、observability 脱敏与配置降级。
 
-几个真实 bug 就是被这些测试逼出来的，例如：
-- 分块时「单位接近上限」的判断写在了追加之后，导致产出超过 `maxTokens` 的块
-- `renderTemplate` 直接读 `values` 而没走 `resolved`，导致 `default` 永远不生效
-- 零宽字符正则因为写字面字符被识别成连字符，会把正文里所有 hyphen 删掉
-- `withRetry` 只在 backoff 期间检查 `AbortSignal`，用户点「停止」后第一次请求仍会真实扣费
+几个真实 bug 就是被这些测试逼出来的：
+
+- 分块时「单位接近上限」的判断写在追加之后，导致产出超过 `maxTokens` 的块；
+- `renderTemplate` 直接读 `values` 而未走 `resolved`，`default` 永远不生效；
+- 零宽字符正则因写字面字符被识别成连字符，会把正文里所有 hyphen 删掉；
+- `withRetry` 只在 backoff 期间检查 `AbortSignal`，用户点「停止」后第一次请求仍会真实扣费；
+- SSE 断线重连时服务端从头重放、客户端又追加，内容翻倍（集成测试锁定「拼接后逐字一致」）。
+
+还有一类**运行环境测试**（`tests/ssr-safety.test.tsx`）：在无 `window` 的环境里真的渲染一次
+客户端组件 —— `tsc` 与 ESLint 都不做运行环境检查。
+
+### 覆盖率为什么只有 ~40%
+
+覆盖率只统计 `src/lib/**` 的纯逻辑，**不包含路由、页面、SSE、数据库路径** ——
+这些由集成测试覆盖。所以 40% 不代表产品整体验证程度，也不要把数字当质量结论。
+阈值是防倒退用的（36/83/70/36），而 branches 当前 82.81% 未达标，是真实的红灯。
 
 ---
 
-## 渲染层：为什么要自己写 Markdown 解析
+## 评测与可观测性
 
-输出的容器 class 是 `prose-lumenote`，`globals.css` 里为它准备了一整套
-h1/ul/blockquote/a/strong 排版规则 —— 但**渲染方式曾是把纯文本直接塞进 div**。
-那些选择器永远匹配不到任何元素，模型输出的 `[标题](https://…)` 就是用户看到的一串字符：
-点不开、解析不了。这就是「文本链接无法解析」的根因。
+- 评测框架：数据集 / 用例 / 运行 / 结果 / judge 校准表；规则断言（contains / regex / JSON /
+  证据链 / 工具使用 / 死循环 / 步数）+ 可选 LLM judge；
+- 报告：[docs/eval-report.md](docs/eval-report.md)，由 `MOCK_LLM=true pnpm eval:report` 生成。
+  **它是 Mock 模式**：MockProvider 输出固定占位文本，规则断言失败是预期的（恰好证明断言有区分力）；
+  报告中的通过率 / 延迟 / 成本**不代表真实模型质量**；
+- **judge 未运行、人工校准未做**；失败样本回归集 8/8 检出 + 2/2 对照组通过，证明断言有区分力；
+- 可观测性：任务级 OTel trace，`taskId` 贯穿 `task.pipeline / llm.request / agent.*`，
+  默认 JSONL 落盘 `.lumenote-data/traces/`（gitignore）；属性脱敏不落 prompt/正文/Key。
+  `TRACE_EXPORT=otlp` 需自备 Collector，**端到端未验证**。
+
+---
+
+## 渲染层：为什么自己写 Markdown 解析
+
+输出容器 class 是 `prose-lumenote`，但早期渲染方式是把纯文本直接塞进 `div` ——
+那些排版选择器永远匹配不到元素，模型输出的 `[标题](https://…)` 就是用户看到的一串死字符。
 
 修复没有引 `react-markdown`，理由是**流式场景**：输出是逐字到达的半成品，
-`[标题](htt` 这种片段在一瞬间是合法输入，解析器必须是纯函数、对任何残缺输入
-只降级不抛错。这条约束只有自己写才能写进代码与测试里。
+`[标题](htt` 这种片段在一瞬间是合法输入，解析器必须是纯函数、对任何残缺输入只降级不抛错。
 
-`src/lib/markdown.ts` 的解析原则：**解析不出来的一律当纯文本，绝不丢字符**。
-安全上只放行 `http/https/mailto`，相对路径与 `javascript:` 一律拒绝
-（模型输出等价于不可信输入，链接就是 XSS 入口）。
+[src/lib/markdown.ts](src/lib/markdown.ts) 的原则：**解析不出来的一律当纯文本，绝不丢字符**；
+安全上只放行 `http/https/mailto`，相对路径与 `javascript:` 一律拒绝（模型输出等价不可信输入）。
 
 ---
 
-## 文档
+## Non-goals（明确不做的事）
 
-- [`docs/architecture.md`](docs/architecture.md) —— 完整架构与取舍
-- [`docs/adr/0001-two-stage-streaming.md`](docs/adr/0001-two-stage-streaming.md) —— 为什么用两段式流式
-- [`docs/adr/0002-llm-provider-abstraction.md`](docs/adr/0002-llm-provider-abstraction.md) —— Provider 抽象与降级链
-- [`docs/adr/0003-deepseek-capability-constraints.md`](docs/adr/0003-deepseek-capability-constraints.md) —— DeepSeek 能力约束
+- **不做多用户协作** —— 单用户工具，共享只到「只读分享链接」这一层；
+- **不做向量检索 / RAG** —— `KnowledgeChunk` 表预留了 pgvector 字段，本期不实现检索；
+- **不做移动端 App** —— Web 响应式够用；
+- **不做自建 LLM 网关** —— 用 AI SDK 的 Provider 抽象，不重复造轮子；
+- **不做实时协同编辑** —— 与核心定位（可追溯的单次生成）无关。
+
+---
+
+## 已知限制（当前真实状态）
+
+1. **`after()` 不是队列**：进程崩溃会留下永久 `running` 任务，无 reaper / 租约 / 重投；
+   执行中不落增量输出，崩溃后已生成内容丢失。详见 [ADR-0005](docs/adr/0005-async-execution-boundary.md)。
+2. **熔断器状态在进程内存**：多实例下各实例独立打开熔断；限流已可 Redis 共享，但熔断没有分布式化。
+3. **CSP 是 Report-Only**：`script-src` 含 `unsafe-inline`、无 nonce；HSTS 仅生产；
+   `proxy.ts` 只做乐观检查、不是安全边界。
+4. **配额是「先查后写」**：并发提交理论上可绕过，靠并发上限 + 限流压缩窗口；
+   彻底修法是把检查与插入放进 `Serializable` 事务或用户级咨询锁。
+5. **MockProvider 不支持 tools**：`MOCK_LLM=true` 时新建 Agent 任务只有 1 步 finalize、
+   `structured=null`、证据 rate=0；证据演示请用 seed 的演示任务。
+6. **Docker / Redis / 真实模型 / GitHub Actions 均未在本环境实际运行**：
+   - 无 Docker → `docker build` / `docker compose config` / `docker run` 未运行；
+     只有 standalone 产物 `node server.js`（20/20）与 PyYAML 静态校验（51/51）；
+   - 无 Redis → `pnpm test:redis` SKIPPED（退出码 2）；CI 的 `rate-limit-redis` job 从未在 GitHub 跑过；
+   - 无真实 Key → 真实模型评测未运行、零费用；judge 未校准；
+   - 仓库没有 remote → CI workflow 未在 GitHub 运行，只做过 actionlint + PyYAML 校验。
+7. **覆盖率 branches 82.81% 低于阈值 83%**：`pnpm test:coverage` 当前退出码 1。
+8. **更换 `AUTH_SECRET` 会导致已保存的 BYOK 密钥全部无法解密**（用户需重填）——
+   加密密钥必须来自服务端，不能与密文同存；解密失败时管线退回站点通道，设置页可见失败记录。
 
 ---
 
 ## 部署
 
+主路径是 Docker Compose 三步（迁移只执行一次，不在 app entrypoint 里）：
+
 ```bash
-docker build -t lumenote .
-docker run -p 3000:3000 --env-file .env.production lumenote
+# 1. 起依赖并等 healthy
+docker compose up -d postgres redis
+
+# 2. 一次性迁移（非 0 退出则中止部署；重复执行是幂等的）
+docker compose run --rm migrate
+
+# 3. 起应用（只连库，不碰 schema）
+docker compose --profile app up -d app
 ```
 
-或推送到 Vercel（Postgres 用 Neon/Supabase，构建时执行 `pnpm prisma:deploy`）。
+必需的环境变量（通过 `.env` / shell / 平台 Secret 注入，镜像内不含 `.env`）：
+
+| 变量 | 说明 |
+|---|---|
+| `AUTH_SECRET` | **必需**，无默认值，缺失时 compose 直接报错；`openssl rand -base64 32` |
+| `POSTGRES_PASSWORD` | Postgres 密码（compose 内默认 `lumenote`，生产必须改） |
+| `MAIL_TRANSPORT` / `RESEND_API_KEY` | 生产必须用 `resend`：`console` 通道在生产环境**硬性禁止**回传验证码 |
+| `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | 真实模型模式需要；只开 Mock 可留空 |
+| `MOCK_LLM` | 演示/预览环境设 `true`，避免真实付费调用 |
+| `RATE_LIMIT_DRIVER` / `REDIS_URL` / `RATE_LIMIT_FAIL_MODE` | 多实例限流用 `redis`；`open` 或 `closed` 决定 Redis 故障时的行为 |
+| `TRUST_PROXY_HOPS` | 反代层数；默认 0（不信任 XFF），配错会导致限流桶共享 |
+| `NEXT_PUBLIC_APP_URL` | 站点地址（生产 HTTPS） |
+
+> ⚠️ **本环境未运行 `docker build` / `docker compose config`**，主路径未在本地验证。
+> 可执行的等价验证是 standalone 产物（见上文验证状态表）；Docker 的未覆盖项在
+> [ADR-0005](docs/adr/0005-async-execution-boundary.md) 中逐条列出。
+
+备选路径：
+
+- **standalone 手动运行**：`$env:BUILD_STANDALONE='true'; pnpm build` 后按
+  `.next/standalone + .next/static + public` 布局运行 `node server.js`；
+- **Vercel + Neon/Supabase**：构建时执行 `pnpm prisma:deploy`；注意 Serverless 的
+  `after()` 执行窗口限制（长任务需迁移外部队列），且本仓库未在 Vercel 实际部署过。
+
+---
+
+## DeepSeek 能力约束（实查文档，核对日期 2026-10-11）
+
+- **模型已换代**：`deepseek-flash`（V4.1-Flash）与 `deepseek-v4-pro`，旧 `deepseek-chat` / `deepseek-reasoner` 已下线；
+- **thinking 默认开启**，effort 默认 high；thinking 下 `temperature` / `presence_penalty` /
+  `frequency_penalty` **静默忽略**（写上去不报错，但完全不生效）；
+- **`top_p` 仅 thinking 生效**，范围 0.95–1.0；
+- **Tool Calls**：带 tools 的请求后续每轮必须回传 `reasoning_content`，否则 API 返 400；
+- **JSON Output**：prompt 需含 "json" 字样，且可能偶发空 content。
+
+详见 [docs/adr/0003-deepseek-capability-constraints.md](docs/adr/0003-deepseek-capability-constraints.md)。
+
+---
+
+## 文档
+
+- [docs/architecture.md](docs/architecture.md) —— 架构、取舍与 4 张 Mermaid 图
+- [docs/interview-guide.md](docs/interview-guide.md) —— 面试指南：设计取舍 + 10 个追问
+- [docs/demo-script.md](docs/demo-script.md) —— 3 分钟演示脚本（Mock / 真实模型 / 失败兜底）
+- [docs/eval-report.md](docs/eval-report.md) —— Mock 模式评测与可观测性报告
+- ADR：
+  - [0001 两段式流式](docs/adr/0001-two-stage-streaming.md)
+  - [0002 Provider 抽象与降级链](docs/adr/0002-llm-provider-abstraction.md)
+  - [0003 DeepSeek 能力约束](docs/adr/0003-deepseek-capability-constraints.md)
+  - [0004 Tool Call 契约（实测）](docs/adr/0004-tool-call-contract-measured.md)
+  - [0005 异步执行边界](docs/adr/0005-async-execution-boundary.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md) —— 分支/提交规范、CI job、绝不提交 secret
 
 ---
 
