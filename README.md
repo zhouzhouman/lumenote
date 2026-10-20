@@ -466,6 +466,10 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
     也不会回传验证码 → 新用户无法注册；必须用 `resend` + `RESEND_API_KEY`（smtp 未接入）。
 12. **seed 的演示账号是固定开发密码**：`demo@lumenote.dev / Lumenote2026!` 只用于演示环境；
     生产不要执行 `pnpm prisma:seed`，或执行后立即删除/改密该账号。
+13. **seed 对内置模板是「原地更新 v1」**：改模板文案后重跑 seed 会改写 `PromptVersion(version=1)`
+    的内容，而历史任务只存 `promptVersionId` —— 严格意义上的「历史 Prompt 不可变」需要
+    在文案变化时新建版本而不是 update。当前按开发期约定处理（演示库可重建）；
+    生产若要求审计级不可变，应改为 seed 只插入新版本、不改旧行。
 
 ---
 
