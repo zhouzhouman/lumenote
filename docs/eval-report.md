@@ -4,8 +4,8 @@
 > 报告中的通过率 / 延迟 / 成本只用于验证**流程、断言与计价口径**，**不代表真实模型质量**。
 > 真实模型评测：**未运行**（无可用 API Key，且明确避免产生费用）。
 
-- 生成时间：2026-10-20 22:13:54 (UTC+8)
-- git commit：`85ff65e`
+- 生成时间：2026-10-20 22:18:06 (UTC+8)
+- git commit：`f6210ec`
 - 被测对象：`mock:deepseek-flash`（MockProvider，未联网）
 - 数据集：文档问答基线（eval:report mock）（4 条用例，内容指纹 `4642-481bc636`）
 - 命令：`pnpm eval:report`（幂等：数据集/用例 upsert、报告任务恒定一条、评测运行历史 append-only）
@@ -18,13 +18,13 @@
 | 被测模型 | mock:deepseek-flash |
 | 计价参考模型 | deepseek-flash（pricing.ts 单价表） |
 | Node / 包管理器 | v22.15.0 / pnpm@10.33.2 |
-| git commit | `85ff65e` |
+| git commit | `f6210ec` |
 | 演示用户 | demo@lumenote.dev |
 | 摘要 Prompt 版本 | `cmv4td1fs0001uczmh0lmxk8z`（v1，模板 `cmv4td1fl0000uczmqm84e4uc`） |
 | Agent Prompt 版本 | `cmvay7i3o0004ogzmmbuvq8we`（v1，模板 `cmvay7i3e0003ogzmumna15fy`） |
 | 数据集 | 文档问答基线（eval:report mock）（id `cmvgremjd000090zmhkb3qmxu`，指纹 `4642-481bc636`） |
 | trace 目录 | `.lumenote-data/traces` |
-| 数据库规模（采集时） | Task 98 / UsageLog 132 / AgentStep 26 / EvalRun 8 |
+| 数据库规模（采集时） | Task 98 / UsageLog 135 / AgentStep 26 / EvalRun 9 |
 
 Prompt 模板版本与数据集均从**真实数据库**读取；数据集表没有 version 字段，因此用「用例内容指纹」作为可比较的版本标识。
 
@@ -33,22 +33,22 @@ Prompt 模板版本与数据集均从**真实数据库**读取；数据集表没
 ⚠️ MockProvider 的输出是一段**固定占位摘要**（不调用模型）。因此要求「包含 50 倍 / 输出 JSON / 使用 search_chunks」的规则断言**必然失败** ——
 这不是模型质量问题，恰恰证明断言会拒绝“不是答案的输出”。真实模型下的通过率需在有 Key 的环境重跑，本轮未运行。
 
-- 评测运行 id：`cmvgrkoh900012kzmy6t8wgre`
+- 评测运行 id：`cmvgrq37f0001rkzmfvyb2m6n`
 - 规则断言结果：**0/4 用例通过**（加权通过率 0.00%）
 - judge：**未运行**（`enableJudge=false`；无 API Key / 避免费用），本轮跳过 1 条 judge 断言
 
 | 用例 | 权重 | 状态 | 通过断言 | 得分 | 耗时 | 失败原因（摘要） |
 | --- | --- | --- | --- | --- | --- | --- |
-| 基础数值提取 | 2 | failed | 3/9（跳过 0） | 0.33 | 12ms | contains: 未包含「50」；contains: 未包含「2%」；agent_tool_used: 没有使用工具 search_chunks（实际用到：无）；agent_evidence_rate: 证据链完整率 0% < 80%；must_be_json: 未能从输出中提取出合法 JSON；json_path_exists: 输出不是可解析的 JSON 对象，无法检查路径 |
-| 防编造：文档中不存在的信息 | 3 | failed | 3/5（跳过 0） | 0.60 | 8ms | regex: 未匹配 /没有\|未找到\|不存在\|未提及\|无法\|未能\|不含\|未包含/；must_be_json: 未能从输出中提取出合法 JSON |
-| 方法归纳：如何提高命中率 | 2 | failed | 2/6（跳过 1） | 0.33 | 5ms | contains: 未包含「前置」；regex: 未匹配 /日期\|随机\|用户名\|id/；agent_evidence_rate: 证据链完整率 0% < 80%；must_be_json: 未能从输出中提取出合法 JSON |
-| 跨段落归纳：成本优化的优先级 | 2 | failed | 2/6（跳过 0） | 0.33 | 4ms | contains: 未包含「缓存」；regex: 未匹配 /峰谷\|2 倍\|两倍/；agent_evidence_rate: 证据链完整率 0% < 80%；must_be_json: 未能从输出中提取出合法 JSON |
+| 基础数值提取 | 2 | failed | 3/9（跳过 0） | 0.33 | 9ms | contains: 未包含「50」；contains: 未包含「2%」；agent_tool_used: 没有使用工具 search_chunks（实际用到：无）；agent_evidence_rate: 证据链完整率 0% < 80%；must_be_json: 未能从输出中提取出合法 JSON；json_path_exists: 输出不是可解析的 JSON 对象，无法检查路径 |
+| 防编造：文档中不存在的信息 | 3 | failed | 3/5（跳过 0） | 0.60 | 3ms | regex: 未匹配 /没有\|未找到\|不存在\|未提及\|无法\|未能\|不含\|未包含/；must_be_json: 未能从输出中提取出合法 JSON |
+| 方法归纳：如何提高命中率 | 2 | failed | 2/6（跳过 1） | 0.33 | 2ms | contains: 未包含「前置」；regex: 未匹配 /日期\|随机\|用户名\|id/；agent_evidence_rate: 证据链完整率 0% < 80%；must_be_json: 未能从输出中提取出合法 JSON |
+| 跨段落归纳：成本优化的优先级 | 2 | failed | 2/6（跳过 0） | 0.33 | 2ms | contains: 未包含「缓存」；regex: 未匹配 /峰谷\|2 倍\|两倍/；agent_evidence_rate: 证据链完整率 0% < 80%；must_be_json: 未能从输出中提取出合法 JSON |
 
 > 说明：judge 断言被标记为 **skipped（未评估）** 而不是 failed —— 没运行不等于模型没通过，两者混在一起会产生假回归。
 
 ### 与基线的对比（仅演示回归报告机制，不做质量结论）
 
-- 基线运行：`cmvgrjv9k0001ewzmdqybaj18`（2026-10-20T14:13:17.960Z）
+- 基线运行：`cmvgrkoh900012kzmy6t8wgre`（2026-10-20T14:13:55.821Z）
 - 结论：**NEUTRAL** —— 没有明显变化：通过率保持 0%，4 个用例输出逐字节相同。
 - 通过率：0.0% → 0.0%（加权 0.0% → 0.0%）
 - 平均得分：0.400 → 0.400
@@ -63,9 +63,9 @@ Prompt 模板版本与数据集均从**真实数据库**读取；数据集表没
 | 指标 | 值 |
 | --- | --- |
 | 生成样本数 | 4 |
-| p50 延迟 | 6.5ms |
-| p95 延迟 | 11.4ms |
-| 平均延迟 | 7.25ms |
+| p50 延迟 | 2.5ms |
+| p95 延迟 | 8.1ms |
+| 平均延迟 | 4ms |
 | token 估算总成本 | $0.000724 ≈ ¥0.0052 |
 
 | 用例 | 输入 token（估） | 输出 token（估） | 成本（估，USD） |
@@ -79,15 +79,15 @@ Prompt 模板版本与数据集均从**真实数据库**读取；数据集表没
 
 ## 4. 指标聚合（真实数据库查询）
 
-- 时间窗口：**最近 30 天（2026-09-20 14:13:54Z → 2026-10-20 14:13:54Z）**
+- 时间窗口：**最近 30 天（2026-09-20 14:18:06Z → 2026-10-20 14:18:06Z）**
 - 每个指标均在表中标注数据来源与口径；数字全部来自对本地数据库的真实查询，不是写死的常量。
 
 ### 4.1 端到端延迟（Task）
 
 | 维度 | 样本数 | p50 | p95 | 平均 | 最小 | 最大 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 全部成功任务 | 98 | 1179ms | 6061.45ms | 2047.79ms | 93ms | 6787ms |
-| type=summarize | 75 | 1099ms | 6065.5ms | 1763.56ms | 439ms | 6787ms |
+| 全部成功任务 | 98 | 1179ms | 6061.45ms | 2047.91ms | 93ms | 6787ms |
+| type=summarize | 75 | 1099ms | 6065.5ms | 1763.72ms | 439ms | 6787ms |
 | type=translate | 4 | 1237.5ms | 1308.75ms | 1237ms | 1156ms | 1317ms |
 | type=write | 4 | 728ms | 827.75ms | 722.25ms | 591ms | 842ms |
 | type=agent | 15 | 4165ms | 5230.8ms | 4038.6ms | 93ms | 6012ms |
@@ -98,7 +98,7 @@ Prompt 模板版本与数据集均从**真实数据库**读取；数据集表没
 
 | 指标 | 值 | 数据来源 | 口径 |
 | --- | --- | --- | --- |
-| 任务级计量记录数 | 132 | UsageLog 行数（任务级结算记录，taskId 唯一） | UsageLog 一行 = 一次任务级计量结算：摘要任务 Map 阶段的多次调用合并进 meta，Agent 的多轮调用合并为一条，因此它 < 实际 generate 次数 |
+| 任务级计量记录数 | 135 | UsageLog 行数（任务级结算记录，taskId 唯一） | UsageLog 一行 = 一次任务级计量结算：摘要任务 Map 阶段的多次调用合并进 meta，Agent 的多轮调用合并为一条，因此它 < 实际 generate 次数 |
 | Agent 模型调用次数 | 26 | AgentStep 行数（每行对应一次模型 generate 调用） | AgentStep 一行 = 一次模型调用（plan/act/finalize/give_up 各对应一次 generate），因此它是 Agent 实际模型调用次数的准确口径 |
 | 其中失败计量记录 | 6 | UsageLog 行数（任务级结算记录，taskId 唯一） | success=false 的行数 |
 
@@ -106,9 +106,9 @@ Prompt 模板版本与数据集均从**真实数据库**读取；数据集表没
 
 | 模型 | 记录数 | 输入 token | 输出 token | 缓存命中 token | 成本（USD） | 成本（CNY 展示） |
 | --- | --- | --- | --- | --- | --- | --- |
-| deepseek-flash | 126 | 120703 | 21972 | 0 | $0.037088 | ¥0.2670 |
+| deepseek-flash | 129 | 125703 | 22716 | 0 | $0.038285 | ¥0.2756 |
 | dead-endpoint-model | 6 | 0 | 0 | 0 | $0.000000 | ¥0.0000 |
-| **合计** | 132 | 120703 | 21972 | 0 | $0.037088 | ¥0.2670 |
+| **合计** | 135 | 125703 | 22716 | 0 | $0.038285 | ¥0.2756 |
 
 > 来源：UsageLog.promptTokens / completionTokens / cachedTokens / UsageLog.estimatedCost（单位：美元；展示时按 7.2 换算人民币）；口径：按 UsageLog 累计：promptTokens（含缓存命中）/ completionTokens / cachedTokens。
 > ⚠️ `UsageLog.estimatedCost` 在代码中存的是**美元**（见 `src/lib/llm/metering.ts`），与 schema 注释「人民币元」不一致；本报告以代码为准，并在展示层按 7.2 换算人民币。
@@ -193,49 +193,49 @@ tracing 由 `src/instrumentation.ts` 在应用启动时初始化；本报告脚�
 
 ### 6.1 一次真实 mock 摘要任务（Map-Reduce 链路）
 
-- taskId：`cmvgrkokt00062kzm1frmygqs`
-- traceId：`7027233f6b48f9d743f446b16cea7c88`
-- span 数：7；根 span 耗时：3086.0ms
+- taskId：`cmvgrq39h0006rkzmd27fqkk2`
+- traceId：`9abd4b2efe381a34673cee07a045ca72`
+- span 数：7；根 span 耗时：3034.3ms
 - span 分布：task.lifecycle=1, llm.request=4, task.persist=1, task.pipeline=1
-- 任务状态=succeeded，DB latencyMs=3074，流水线墙钟耗时=3088ms；同一 taskId 在 JSONL 中匹配到 1 条 trace（展示最新一条）。
+- 任务状态=succeeded，DB latencyMs=3026，流水线墙钟耗时=3035ms；同一 taskId 在 JSONL 中匹配到 1 条 trace（展示最新一条）。
 
 ```text
-task.pipeline [taskId=cmvgrkokt00062kzm1frmygqs, type=summarize, model=deepseek-flash, chunkCount=3] 3086.0ms (traceId=7027233f6b48f9d743f446b16cea7c88)
-├─ task.lifecycle [taskId=cmvgrkokt00062kzm1frmygqs, type=summarize, model=deepseek-flash, chunkCount=3] 50.3ms
-├─ llm.request [taskId=cmvgrkokt00062kzm1frmygqs, phase=map, model=deepseek-flash, provider=mock, inputTokens=1645, outputTokens=251, attempt=1, chunkIndex=0, degraded=false] 1505.3ms
-├─ llm.request [taskId=cmvgrkokt00062kzm1frmygqs, phase=map, model=deepseek-flash, provider=mock, inputTokens=1692, outputTokens=243, attempt=1, chunkIndex=1, degraded=false] 1505.1ms
-├─ llm.request [taskId=cmvgrkokt00062kzm1frmygqs, phase=map, model=deepseek-flash, provider=mock, inputTokens=1663, outputTokens=250, attempt=1, chunkIndex=2, degraded=false] 1505.3ms
-├─ llm.request [taskId=cmvgrkokt00062kzm1frmygqs, phase=reduce, model=deepseek-flash, provider=mock, inputTokens=1268, outputTokens=218, attempt=1, degraded=false] 1488.3ms
-└─ task.persist [taskId=cmvgrkokt00062kzm1frmygqs, degraded=false, status=succeeded] 7.5ms
+task.pipeline [taskId=cmvgrq39h0006rkzmd27fqkk2, type=summarize, model=deepseek-flash, chunkCount=3] 3034.3ms (traceId=9abd4b2efe381a34673cee07a045ca72)
+├─ task.lifecycle [taskId=cmvgrq39h0006rkzmd27fqkk2, type=summarize, model=deepseek-flash, chunkCount=3] 25.5ms
+├─ llm.request [taskId=cmvgrq39h0006rkzmd27fqkk2, phase=map, model=deepseek-flash, provider=mock, inputTokens=1645, outputTokens=251, attempt=1, chunkIndex=0, degraded=false] 1492.2ms
+├─ llm.request [taskId=cmvgrq39h0006rkzmd27fqkk2, phase=map, model=deepseek-flash, provider=mock, inputTokens=1692, outputTokens=243, attempt=1, chunkIndex=1, degraded=false] 1492.6ms
+├─ llm.request [taskId=cmvgrq39h0006rkzmd27fqkk2, phase=map, model=deepseek-flash, provider=mock, inputTokens=1663, outputTokens=250, attempt=1, chunkIndex=2, degraded=false] 1493.4ms
+├─ llm.request [taskId=cmvgrq39h0006rkzmd27fqkk2, phase=reduce, model=deepseek-flash, provider=mock, inputTokens=1268, outputTokens=218, attempt=1, degraded=false] 1482.5ms
+└─ task.persist [taskId=cmvgrq39h0006rkzmd27fqkk2, degraded=false, status=succeeded] 5.4ms
 ```
 
 | span | 父 span | 耗时 | 关键属性 |
 | --- | --- | --- | --- |
-| task.pipeline | —（根） | 3086.0ms | taskId=cmvgrkokt00062kzm1frmygqs, type=summarize, model=deepseek-flash, chunkCount=3 |
-| task.lifecycle | task.pipeline | 50.3ms | taskId=cmvgrkokt00062kzm1frmygqs, type=summarize, model=deepseek-flash, chunkCount=3 |
-| llm.request | task.pipeline | 1505.3ms | taskId=cmvgrkokt00062kzm1frmygqs, phase=map, model=deepseek-flash, provider=mock, inputTokens=1645, outputTokens=251, attempt=1, chunkIndex=0 |
-| llm.request | task.pipeline | 1505.1ms | taskId=cmvgrkokt00062kzm1frmygqs, phase=map, model=deepseek-flash, provider=mock, inputTokens=1692, outputTokens=243, attempt=1, chunkIndex=1 |
-| llm.request | task.pipeline | 1505.3ms | taskId=cmvgrkokt00062kzm1frmygqs, phase=map, model=deepseek-flash, provider=mock, inputTokens=1663, outputTokens=250, attempt=1, chunkIndex=2 |
-| llm.request | task.pipeline | 1488.3ms | taskId=cmvgrkokt00062kzm1frmygqs, phase=reduce, model=deepseek-flash, provider=mock, inputTokens=1268, outputTokens=218, attempt=1 |
-| task.persist | task.pipeline | 7.5ms | taskId=cmvgrkokt00062kzm1frmygqs, status=succeeded |
+| task.pipeline | —（根） | 3034.3ms | taskId=cmvgrq39h0006rkzmd27fqkk2, type=summarize, model=deepseek-flash, chunkCount=3 |
+| task.lifecycle | task.pipeline | 25.5ms | taskId=cmvgrq39h0006rkzmd27fqkk2, type=summarize, model=deepseek-flash, chunkCount=3 |
+| llm.request | task.pipeline | 1492.2ms | taskId=cmvgrq39h0006rkzmd27fqkk2, phase=map, model=deepseek-flash, provider=mock, inputTokens=1645, outputTokens=251, attempt=1, chunkIndex=0 |
+| llm.request | task.pipeline | 1492.6ms | taskId=cmvgrq39h0006rkzmd27fqkk2, phase=map, model=deepseek-flash, provider=mock, inputTokens=1692, outputTokens=243, attempt=1, chunkIndex=1 |
+| llm.request | task.pipeline | 1493.4ms | taskId=cmvgrq39h0006rkzmd27fqkk2, phase=map, model=deepseek-flash, provider=mock, inputTokens=1663, outputTokens=250, attempt=1, chunkIndex=2 |
+| llm.request | task.pipeline | 1482.5ms | taskId=cmvgrq39h0006rkzmd27fqkk2, phase=reduce, model=deepseek-flash, provider=mock, inputTokens=1268, outputTokens=218, attempt=1 |
+| task.persist | task.pipeline | 5.4ms | taskId=cmvgrq39h0006rkzmd27fqkk2, status=succeeded |
 
 ### 6.2 Agent 完整链路（脚本化 Provider，仅验证 span 结构）
 
 - taskId：`eval-report-scripted-agent`
-- traceId：`1e94d6512a250edf14c87c4074533695`
-- span 数：9；根 span 耗时：6.1ms
+- traceId：`9650e62f3bdbd1eef6b18eb65878332a`
+- span 数：9；根 span 耗时：5.2ms
 - span 分布：llm.request=2, agent.plan=2, agent.tool=1, agent.observe=1, agent.evidence_check=1, agent.finalize=1, task.pipeline=1
-- 脚本化 Provider（固定剧本，仅验证 trace 结构）：status=succeeded，steps=2，证据链完整率=1；墙钟耗时=7ms。同一 taskId 匹配到 5 条 trace（展示最新一条）。⚠️ 该链路不代表真实模型质量。
+- 脚本化 Provider（固定剧本，仅验证 trace 结构）：status=succeeded，steps=2，证据链完整率=1；墙钟耗时=6ms。同一 taskId 匹配到 1 条 trace（展示最新一条）。⚠️ 该链路不代表真实模型质量。
 
 ```text
-task.pipeline [taskId=eval-report-scripted-agent, type=agent, model=deepseek-flash] 6.1ms
-├─ agent.plan [taskId=eval-report-scripted-agent, inputTokens=420, outputTokens=12, step=1] 0.6ms
+task.pipeline [taskId=eval-report-scripted-agent, type=agent, model=deepseek-flash] 5.2ms
+├─ agent.plan [taskId=eval-report-scripted-agent, inputTokens=420, outputTokens=12, step=1] 1.1ms
 │  └─ llm.request [taskId=eval-report-scripted-agent, phase=agent, model=deepseek-flash, provider=scripted-mock, inputTokens=420, outputTokens=12, attempt=1, step=1] 0.2ms
-├─ agent.tool [taskId=eval-report-scripted-agent, toolName=search_chunks, ok=true] 0.6ms
-├─ agent.observe [taskId=eval-report-scripted-agent, step=1] 0.1ms
-├─ agent.plan [taskId=eval-report-scripted-agent, inputTokens=760, outputTokens=140, step=2] 0.5ms
+├─ agent.tool [taskId=eval-report-scripted-agent, toolName=search_chunks, ok=true] 0.5ms
+├─ agent.observe [taskId=eval-report-scripted-agent, step=1] 0.0ms
+├─ agent.plan [taskId=eval-report-scripted-agent, inputTokens=760, outputTokens=140, step=2] 0.4ms
 │  └─ llm.request [taskId=eval-report-scripted-agent, phase=agent, model=deepseek-flash, provider=scripted-mock, inputTokens=760, outputTokens=140, attempt=1, step=2] 0.1ms
-└─ agent.finalize [taskId=eval-report-scripted-agent, inputTokens=1180, outputTokens=152, degraded=false, status=succeeded, stopReason=model_finalized] 0.7ms
+└─ agent.finalize [taskId=eval-report-scripted-agent, inputTokens=1180, outputTokens=152, degraded=false, status=succeeded, stopReason=model_finalized] 0.6ms
    └─ agent.evidence_check [taskId=eval-report-scripted-agent, rate=1, unsupported=0] 0.0ms
 ```
 
@@ -273,5 +273,5 @@ pnpm typecheck && pnpm lint && pnpm test && pnpm build
 
 > 报告由脚本覆盖式生成；`.eval-results/` 与 `.lumenote-data/traces/*.jsonl` 已在 `.gitignore` 中，不会入库。
 
-<!-- report-fingerprint: 4642-481bc636-4642-481bc636-85ff65e -->
+<!-- report-fingerprint: 4642-481bc636-4642-481bc636-f6210ec -->
 
