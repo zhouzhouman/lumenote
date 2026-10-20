@@ -20,3 +20,12 @@ description = "测试夹具中的伪造 API key（用于单测掩码与守卫逻
 paths = [
   '''tests/.*\.test\.tsx?$''',
 ]
+
+# CI 与测试配置里必须存在的「合法假值」：它们被当作占位符写死在仓库里，
+# 不是真实凭据。按精确值豁免，而不是整文件豁免，避免降低这些文件的检测能力。
+[[allowlists]]
+description = "CI / vitest 配置中的占位 secret（非真实凭据）"
+regexes = [
+  '''ci-secret-at-least-32-characters-long-xxxx''',
+  '''test-secret-that-is-at-least-32-characters-long''',
+]
