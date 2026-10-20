@@ -26,6 +26,23 @@
  *   MAIL_TRANSPORT=console —— 注册验证码从接口 devCode 回传，不需要真发邮件
  *   NODE_ENV=development   —— console 通道仅在非生产环境回传 devCode
  *
+ * ## 可重复性加固（踩过一次 flaky 后补的）
+ *
+ * 1. **端口绝不静默复用**。默认端口被占用时先杀掉残留的 `next dev`；杀不掉就
+ *    `listen(0)` 自动选一个空闲端口（并把新端口注入 baseUrl），绝不出现
+ *    「health 检查打到上一次的旧服务」。启动后还会用 `/api/health` 的
+ *    `uptimeSec` 与本次 spawn 的 elapsed 对比，确认响应来自**本次**进程。
+ * 2. **子进程 env 优先级**：Next 的 loadEnvConfig 只补充 process.env 里
+ *    **不存在**的键，因此显式传入的 env 不会被仓库 `.env.local` 覆盖。
+ *    另外还强制把 `DEEPSEEK_API_KEY/OPENAI_API_KEY/RESEND_API_KEY` 置空字符串
+ *    （空字符串也算「已存在」），即使 mock 开关意外失效，应用也会在启动期因
+ *    「没有任何 LLM Key」直接失败，而**不会**产生真实付费调用。
+ * 3. **数据库安全阀**：重置 schema 前校验 DATABASE_URL 的库名含 `test`，
+ *    避免误把 `lumenote` 生产库 DROP 掉（需要显式设置
+ *    `INTEGRATION_ALLOW_NON_TEST_DB=1` 才能跳过该检查）。
+ * 4. **teardown 等待端口真正释放**：kill 进程树后轮询端口，超时则再杀一次并
+ *    打印警告（含占用进程信息），便于下一次运行定位。
+ *
  * ## 允许复用外部服务
  *
  * 设置 `INTEGRATION_BASE_URL` 时跳过上述所有步骤（不重置数据库、不启动/杀进程），
@@ -62,6 +79,8 @@ const log = (msg: string) => console.info(`[integration] ${msg}`);
 let server: ChildProcess | null = null;
 let serverLogs = '';
 let cleanupInstalled = false;
+/** 本次实际使用的端口（可能与偏好端口不同；teardown 必须等它释放） */
+let activePort: number | null = null;
 
 function appendLog(chunk: Buffer | string): void {
   serverLogs += chunk.toString();
@@ -115,8 +134,8 @@ function killTree(pid: number): void {
   }
 }
 
-/** 找到占用端口的进程并杀掉（上一次运行崩溃时最常见的残留） */
-function killPortOccupant(port: number): void {
+/** 列出占用端口的进程 PID（Windows: netstat；POSIX: lsof） */
+function portOccupantPids(port: number): string[] {
   try {
     if (IS_WIN) {
       const out = spawnSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf8' }).stdout ?? '';
@@ -128,45 +147,92 @@ function killPortOccupant(port: number): void {
         const pid = line.trim().split(/\s+/).pop();
         if (pid && /^\d+$/.test(pid)) pids.add(pid);
       }
-      for (const pid of pids) {
-        log(`· 端口 ${port} 被 pid=${pid} 占用，尝试杀掉残留进程`);
-        spawnSync('taskkill', ['/PID', pid, '/T', '/F'], { stdio: 'ignore' });
-      }
-    } else {
-      const out = spawnSync('lsof', ['-ti', `tcp:${port}`], { encoding: 'utf8' }).stdout ?? '';
-      for (const pid of out.split(/\s+/).filter(Boolean)) {
-        log(`· 端口 ${port} 被 pid=${pid} 占用，尝试杀掉残留进程`);
-        try {
-          process.kill(Number(pid), 'SIGKILL');
-        } catch {
-          /* 已退出 */
-        }
-      }
+      return [...pids];
     }
+    const out = spawnSync('lsof', ['-ti', `tcp:${port}`], { encoding: 'utf8' }).stdout ?? '';
+    return out.split(/\s+/).filter(Boolean);
   } catch {
-    // 没有 netstat/lsof 也不该让整轮测试失败；下面会等待并给出清晰报错
+    // 没有 netstat/lsof 也不该让整轮测试失败；调用方会按「杀不掉 → 换端口」处理
+    return [];
   }
 }
 
-async function ensurePortFree(port: number): Promise<void> {
-  if (!(await tcpOpen('127.0.0.1', port))) return;
-  killPortOccupant(port);
-  for (let i = 0; i < 20; i += 1) {
+/** 找到占用端口的进程并杀掉（上一次运行崩溃时最常见的残留） */
+function killPortOccupant(port: number): string[] {
+  const pids = portOccupantPids(port);
+  for (const pid of pids) {
+    log(`· 端口 ${port} 被 pid=${pid} 占用，尝试杀掉残留进程（不会直接复用旧服务）`);
+    try {
+      if (IS_WIN) {
+        spawnSync('taskkill', ['/PID', pid, '/T', '/F'], { stdio: 'ignore' });
+      } else {
+        process.kill(Number(pid), 'SIGKILL');
+      }
+    } catch {
+      /* 已退出 / 权限不足：由调用方继续等待并决定是否换端口 */
+    }
+  }
+  return pids;
+}
+
+/** 让操作系统分配一个空闲端口（listen(0) 后立即关闭） */
+async function findFreePort(): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const probe = net.createServer();
+    probe.unref();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      const port = typeof address === 'object' && address !== null ? address.port : 0;
+      probe.close((err) => {
+        if (err) reject(err);
+        else if (port > 0) resolve(port);
+        else reject(new Error('无法从 listen(0) 获取端口'));
+      });
+    });
+  });
+}
+
+/**
+ * 选择本次运行实际使用的端口。
+ *
+ * 策略（**绝不静默复用旧服务**）：
+ *  1. 偏好端口空闲 → 直接用；
+ *  2. 被占用 → 打印占用进程并杀掉残留（上一次运行崩溃留下的 next dev），
+ *     等待 ≤8s 确认释放；
+ *  3. 杀不掉/释放不了 → 用 `listen(0)` 自动选空闲端口，并明确日志告知。
+ */
+async function choosePort(preferred: number): Promise<number> {
+  if (!(await tcpOpen('127.0.0.1', preferred))) return preferred;
+
+  log(`⚠️ 端口 ${preferred} 已被占用（不会静默复用该服务）`);
+  const pids = killPortOccupant(preferred);
+  if (pids.length === 0) {
+    log(`⚠️ 未能识别端口 ${preferred} 的占用进程（可能权限不足）`);
+  }
+
+  for (let i = 0; i < 32; i += 1) {
+    // 8s = 32 × 250ms；Windows taskkill 生效需要一点时间
     await sleep(250);
-    if (!(await tcpOpen('127.0.0.1', port))) return;
+    if (!(await tcpOpen('127.0.0.1', preferred))) {
+      log(`· 端口 ${preferred} 已重新释放，继续使用偏好端口`);
+      return preferred;
+    }
   }
-  throw new Error(
-    `端口 ${port} 仍被占用。请先手动释放（或设置 INTEGRATION_PORT 换一个端口）后再运行集成测试。`,
-  );
+
+  const fallback = await findFreePort();
+  log(`⚠️ 端口 ${preferred} 在 8s 内仍被占用，自动改用空闲端口 ${fallback}（本次 baseUrl 会指向该端口）`);
+  return fallback;
 }
 
-async function waitForPortReleased(port: number, timeoutMs = 15_000): Promise<void> {
+/** 等端口真正空闲（kill 进程树后必须确认，否则下一次运行会打到旧服务） */
+async function waitForPortReleased(port: number, timeoutMs = 15_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!(await tcpOpen('127.0.0.1', port, 300))) return;
+    if (!(await tcpOpen('127.0.0.1', port, 300))) return true;
     await sleep(250);
   }
-  log(`⚠️ 端口 ${port} 在 ${timeoutMs}ms 内未释放，下一次运行前会被自动清理`);
+  return false;
 }
 
 /** 同步执行一个 CLI 步骤，失败时把 stdout/stderr 一起带进错误信息 */
@@ -193,8 +259,41 @@ function runCli(label: string, scriptPath: string, args: string[], env: NodeJS.P
   }
 }
 
+/**
+ * 重置 schema 前的安全阀：库名必须看起来是测试库。
+ *
+ * 集成测试会 `DROP SCHEMA public CASCADE`，一旦 DATABASE_URL 被 shell/CI
+ * 误指向 `lumenote`（生产/开发库），这是不可恢复的数据事故。宁可多一步报错。
+ */
+function assertSafeToResetDatabase(databaseUrl: string): void {
+  if (process.env.INTEGRATION_ALLOW_NON_TEST_DB === '1') {
+    log('⚠️ INTEGRATION_ALLOW_NON_TEST_DB=1：已显式允许对非 test 库执行 DROP SCHEMA');
+    return;
+  }
+
+  let host = '';
+  let dbName = '';
+  try {
+    const parsed = new URL(databaseUrl);
+    host = parsed.hostname;
+    dbName = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+  } catch {
+    throw new Error(`无法解析 DATABASE_URL（${databaseUrl.replace(/:\/\/[^@]*@/, '://***@')}），拒绝执行 DROP SCHEMA`);
+  }
+
+  if (!/test/i.test(dbName)) {
+    throw new Error(
+      `拒绝运行：DATABASE_URL 指向数据库 "${dbName}"（host=${host}），看起来不是测试库。\n` +
+        '集成测试会 DROP SCHEMA public CASCADE，请确认 DATABASE_URL 指向 *_test 库；\n' +
+        '若确实要对非测试库执行，请显式设置 INTEGRATION_ALLOW_NON_TEST_DB=1。',
+    );
+  }
+  log(`· 数据库安全检查通过：host=${host} db=${dbName}`);
+}
+
 /** 清空测试库的 public schema。比逐表 truncate 更彻底（枚举/序列/索引一起消失） */
 async function resetSchema(databaseUrl: string): Promise<void> {
+  assertSafeToResetDatabase(databaseUrl);
   log('· 重置数据库 schema（DROP SCHEMA public CASCADE; CREATE SCHEMA public;）…');
   const prisma = new PrismaClient({
     adapter: new PrismaPg({ connectionString: databaseUrl, max: 1 }),
@@ -216,8 +315,20 @@ function serverEnv(port: number, databaseUrl: string, directUrl: string): NodeJS
     DIRECT_URL: directUrl,
     // 认证：env.ts 要求 >= 16 字符
     AUTH_SECRET: resolveAuthSecret(),
-    // 绝不产生真实付费调用
+    /**
+     * 绝不产生真实付费调用。
+     *
+     * MOCK_LLM 显式置 true；同时把各家 Key 强制置为空字符串。
+     * Next 的 loadEnvConfig 只补充 process.env 中**不存在**的键，
+     * 已存在（含空字符串）的键不会被 `.env.local` 覆盖 —— 这样即使
+     * 仓库里的 `.env.local` 写着 MOCK_LLM=false + 真实 Key（main worktree 就是），
+     * 本进程也只会看到空 Key：mock 关掉时应用会在启动期直接报
+     * 「没有任何 LLM API Key」而失败，而不是偷偷发起真实调用。
+     */
     MOCK_LLM: 'true',
+    DEEPSEEK_API_KEY: '',
+    OPENAI_API_KEY: '',
+    RESEND_API_KEY: '',
     DEFAULT_MODEL: process.env.DEFAULT_MODEL ?? 'deepseek-flash',
     FALLBACK_MODEL: process.env.FALLBACK_MODEL ?? 'deepseek-v4-pro',
     // 限流：内存实现（CI 无 Redis），XFF 从右数第 1 段取 IP
@@ -240,10 +351,17 @@ function serverEnv(port: number, databaseUrl: string, directUrl: string): NodeJS
   };
 }
 
+interface HealthPayload {
+  status?: string;
+  uptimeSec?: number;
+  version?: string;
+}
+
+/** 轮询 /api/health；返回健康检查载荷（供实例新鲜度校验） */
 async function waitForHealth(
   baseUrl: string,
   isExited: () => boolean,
-): Promise<void> {
+): Promise<HealthPayload> {
   const deadline = Date.now() + HEALTH_TIMEOUT_MS;
   let lastError = '尚未发出请求';
 
@@ -258,8 +376,8 @@ async function waitForHealth(
       });
       const text = await res.text();
       if (res.status === 200) {
-        const json = JSON.parse(text) as { db?: { ok?: boolean } };
-        if (json.db?.ok === true) return;
+        const json = JSON.parse(text) as HealthPayload & { db?: { ok?: boolean } };
+        if (json.db?.ok === true) return json;
         lastError = `HTTP 200 但 db.ok=${String(json.db?.ok)}`;
       } else {
         lastError = `HTTP ${res.status}: ${text.slice(0, 300)}`;
@@ -276,25 +394,45 @@ async function waitForHealth(
   );
 }
 
-async function startServer(
+/**
+ * 实例新鲜度校验：确认 /api/health 响应来自**本次 spawn** 的进程。
+ *
+ * 这是「health 打到了别人的旧服务」的最后一道防线：
+ * 旧服务的 `uptimeSec` 会明显大于本次子进程的已运行时长。
+ * 只做下限宽松判断（+15s 余量），避免把正常启动误杀。
+ */
+function assertFreshInstance(health: HealthPayload, spawnedAt: number, port: number): void {
+  if (typeof health.uptimeSec !== 'number') return; // 兼容没有该字段的旧服务端
+  const elapsedSec = (Date.now() - spawnedAt) / 1000;
+
+  if (health.uptimeSec > elapsedSec + 15) {
+    const pids = portOccupantPids(port);
+    throw new Error(
+      `/api/health 返回 uptimeSec=${health.uptimeSec}s，但本次 next dev 只启动了 ${elapsedSec.toFixed(1)}s。\n` +
+        `说明端口 ${port} 上响应的是旧服务（不是本次启动的进程），已中止 —— 不会用旧代码/旧 env 跑测试。\n` +
+        `当前占用该端口的进程：${pids.join(', ') || '(未识别)'}。` +
+        '请检查是否有其他 worktree 的 dev server 占用了同一端口。',
+    );
+  }
+
+  log(`· 实例校验通过：health.uptimeSec=${health.uptimeSec}s ≤ 本次启动 ${elapsedSec.toFixed(1)}s + 15s`);
+}
+
+interface StartedServer {
+  baseUrl: string;
+  port: number;
+}
+
+/** 启动一次（内部失败会清理进程）；端口冲突/旧服务问题由调用方换端口重试 */
+async function spawnServer(
   port: number,
   databaseUrl: string,
   directUrl: string,
-): Promise<string> {
+): Promise<StartedServer> {
   const root = projectRoot();
-  const nextBin = nextCliPath(root);
-  if (!fs.existsSync(nextBin)) {
-    throw new Error(`找不到 Next CLI：${nextBin}（是否忘了 pnpm install？）`);
-  }
-  if (!fs.existsSync(path.join(root, 'node_modules', 'prisma', 'build', 'index.js'))) {
-    throw new Error('找不到 Prisma CLI，集成测试需要 prisma migrate deploy');
-  }
-
-  await ensurePortFree(port);
-
   const baseUrl = `http://127.0.0.1:${port}`;
   const args = [
-    nextBin,
+    nextCliPath(root),
     'dev',
     '-p',
     String(port),
@@ -303,6 +441,8 @@ async function startServer(
     ...detectDevBundlerArgs(root),
   ];
 
+  log('· 子进程 env 已强制：MOCK_LLM=true + DEEPSEEK/OPENAI/RESEND key 置空（空字符串同样不可被 .env.local 覆盖）');
+  log('· Next env 优先级：process.env 中已存在的键不会被 .env.local 覆盖，显式注入值优先生效');
   log(`· 启动被测应用：next dev port=${port}（首次请求需要编译路由，会稍慢）`);
   serverLogs = '';
 
@@ -314,6 +454,7 @@ async function startServer(
     // POSIX 下让子进程成为独立进程组，teardown 时能整组杀掉
     detached: !IS_WIN,
   });
+  const spawnedAt = Date.now();
 
   let exited = false;
   server.on('exit', (code, signal) => {
@@ -342,22 +483,72 @@ async function startServer(
   }
 
   try {
-    await waitForHealth(baseUrl, () => exited);
+    const health = await waitForHealth(baseUrl, () => exited);
+    if (exited) {
+      throw new Error(`应用进程在健康检查后立即退出。服务端日志尾部：\n${serverLogTail()}`);
+    }
+    assertFreshInstance(health, spawnedAt, port);
   } catch (e) {
     await stopServer(port);
     throw e;
   }
 
   log(`· 应用已就绪：${baseUrl}`);
-  return baseUrl;
+  return { baseUrl, port };
 }
 
-async function stopServer(port: number): Promise<void> {
+/**
+ * 启动被测应用。
+ *
+ * 最多尝试两次：
+ *  1. 偏好端口（被残留进程占用时先清理；清不掉则自动改用 listen(0) 的空闲端口）；
+ *  2. 若第一次仍失败（端口竞争、旧服务未退干净），换一个全新的空闲端口再试。
+ * 两次都失败才抛错，避免「第一次偶发失败就要整轮重跑」。
+ */
+async function startServer(databaseUrl: string, directUrl: string): Promise<StartedServer> {
+  const root = projectRoot();
+  const nextBin = nextCliPath(root);
+  if (!fs.existsSync(nextBin)) {
+    throw new Error(`找不到 Next CLI：${nextBin}（是否忘了 pnpm install？）`);
+  }
+  if (!fs.existsSync(path.join(root, 'node_modules', 'prisma', 'build', 'index.js'))) {
+    throw new Error('找不到 Prisma CLI，集成测试需要 prisma migrate deploy');
+  }
+
+  const preferred = resolveIntegrationPort();
+  let lastError: unknown = new Error('未尝试启动');
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const port = attempt === 1 ? await choosePort(preferred) : await findFreePort();
+    log(`· 启动被测应用（第 ${attempt}/2 次尝试，port=${port}）`);
+    try {
+      const started = await spawnServer(port, databaseUrl, directUrl);
+      activePort = started.port;
+      return started;
+    } catch (e) {
+      lastError = e;
+      const firstLine = (e instanceof Error ? e.message : String(e)).split('\n')[0];
+      log(`⚠️ 第 ${attempt} 次启动失败：${firstLine}`);
+      if (attempt < 2) log('· 换一个空闲端口重试（避免端口/旧服务残留造成整轮 flaky）');
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+/** 杀掉应用进程树，并等待端口真正释放（失败只告警，不抛错以免掩盖测试失败） */
+async function stopServer(port: number | null): Promise<void> {
+  const targetPort = port ?? activePort;
   const child = server;
   server = null;
-  if (!child?.pid) return;
+  activePort = null;
 
-  log(`· 清理被测应用进程树（pid=${child.pid}）…`);
+  if (!child?.pid) {
+    if (targetPort !== null) await waitForPortReleased(targetPort, 5_000);
+    return;
+  }
+
+  log(`· 清理被测应用进程树（pid=${child.pid}，port=${String(targetPort)}）…`);
   killTree(child.pid);
   // 先等进程退出，再等端口释放；Windows 的 taskkill 是异步生效的
   const deadline = Date.now() + 10_000;
@@ -365,7 +556,25 @@ async function stopServer(port: number): Promise<void> {
     if (child.exitCode !== null || child.killed) break;
     await sleep(200);
   }
-  await waitForPortReleased(port);
+
+  if (targetPort === null) return;
+
+  let released = await waitForPortReleased(targetPort);
+  if (!released) {
+    log(`⚠️ kill 后 15s 端口 ${targetPort} 仍被监听，再杀一次占用进程…`);
+    killPortOccupant(targetPort);
+    released = await waitForPortReleased(targetPort, 5_000);
+  }
+
+  if (!released) {
+    const pids = portOccupantPids(targetPort);
+    log(
+      `⚠️ 警告：端口 ${targetPort} 在 teardown 后仍未释放（占用 pid: ${pids.join(', ') || '未识别'}）。` +
+        '下一次运行会自动清理；若持续出现请手动结束该进程。',
+    );
+  } else {
+    log(`· 端口 ${targetPort} 已释放`);
+  }
 }
 
 /**
@@ -373,14 +582,17 @@ async function stopServer(port: number): Promise<void> {
  * `provide` 的值在测试里通过 `inject('integrationBaseUrl')` 读取。
  */
 export default async function globalSetup({ provide }: GlobalSetupContext): Promise<() => Promise<void>> {
-  const port = resolveIntegrationPort();
   const externalBaseUrl = process.env.INTEGRATION_BASE_URL?.trim();
 
   // ---- 复用外部服务：不清理任何东西，只验证它可用 ----
   if (externalBaseUrl) {
     const baseUrl = resolveBaseUrl();
     log(`· INTEGRATION_BASE_URL=${baseUrl}，跳过数据库重置与服务启动（复用外部服务）`);
-    await waitForHealth(baseUrl, () => false);
+    const health = await waitForHealth(baseUrl, () => false);
+    log(
+      `· 外部服务健康检查通过（uptimeSec=${String(health.uptimeSec ?? '未知')}；` +
+        '外部模式不做实例新鲜度校验，也不会 kill 任何进程）',
+    );
     process.env.INTEGRATION_BASE_URL = baseUrl;
     provide('integrationBaseUrl', baseUrl);
     return async () => {
@@ -392,7 +604,7 @@ export default async function globalSetup({ provide }: GlobalSetupContext): Prom
   const directUrl = resolveDirectUrl();
   log(`· 测试数据库：${databaseUrl.replace(/:\/\/[^@]*@/, '://***@')}`);
 
-  // 1) 空库
+  // 1) 空库（resetSchema 内部有「必须是测试库」的安全阀）
   await resetSchema(directUrl);
 
   // 2) 迁移（Prisma CLI 自身会读 prisma.config.ts；显式 env 优先于 .env.local）
@@ -410,17 +622,17 @@ export default async function globalSetup({ provide }: GlobalSetupContext): Prom
     NODE_ENV: 'development',
   });
 
-  // 4) + 5) 启动应用并等待健康检查
-  const baseUrl = await startServer(port, databaseUrl, directUrl);
+  // 4) + 5) 启动应用并等待健康检查（端口与实例新鲜度校验在 startServer 内）
+  const started = await startServer(databaseUrl, directUrl);
 
-  process.env.INTEGRATION_BASE_URL = baseUrl;
-  process.env.INTEGRATION_PORT = String(port);
-  provide('integrationBaseUrl', baseUrl);
+  process.env.INTEGRATION_BASE_URL = started.baseUrl;
+  process.env.INTEGRATION_PORT = String(started.port);
+  provide('integrationBaseUrl', started.baseUrl);
 
-  log('· 环境就绪，开始执行集成测试');
+  log(`· 环境就绪（baseUrl=${started.baseUrl}），开始执行集成测试`);
 
   return async () => {
-    await stopServer(port);
+    await stopServer(started.port);
     log('· teardown 完成');
   };
 }
