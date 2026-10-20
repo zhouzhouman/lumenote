@@ -12,15 +12,20 @@ src/
 ├─ app/
 │  ├─ (auth)/login, register      未登录区
 │  ├─ (app)/workspace, history, usage   受保护区（服务端 layout 鉴权）
-│  └─ api/                        所有路由，runtime = 'nodejs'
+│  └─ api/                        所有 Route Handler，runtime = 'nodejs'
 ├─ components/                    UI 组件
 ├─ lib/
-│  ├─ llm/                        Provider 抽象 + 可靠性 + 计价
-│  ├─ pipeline/                   摘要管线（分块 / 渲染 / 编排）
-│  ├─ auth/                       鉴权与越权防护
-│  ├─ http/                       SSRF 防护
-│  └─ *.ts                        sse / rate-limit / idempotency 等基础设施
-└─ types/api.ts                   前后端共享类型
+│  ├─ llm/                        Provider 抽象 + 重试/熔断/降级 + 计价
+│  ├─ pipeline/                   摘要管线（lifecycle / map-reduce / persistence / prompts）
+│  ├─ agent/                      Agent 状态机（orchestrator / budget / tool-dispatch / evidence / output / trajectory）
+│  ├─ rate-limit/                 限流 store 抽象（memory / redis）与客户端 IP 解析
+│  ├─ observability/             OTel tracing、JSONL exporter、指标聚合、脱敏
+│  ├─ auth/                      鉴权与越权防护
+│  ├─ http/                      SSRF 防护
+│  └─ *.ts                       sse / idempotency / markdown 等基础设施
+├─ proxy.ts                      路由乐观检查 + 安全响应头（Next 16 文件约定）
+├─ instrumentation.ts            可观测性初始化（失败不阻塞启动）
+└─ types/api.ts                  前后端共享类型
 ```
 
 ---
@@ -88,10 +93,11 @@ GET /api/tasks/:id/stream
 ### 降级链
 
 ```
-mock（本地，无网络）
-  → deepseek-flash
+MOCK_LLM=true 时只有 MockProvider（本地模拟流式，不联网，不产生费用）
+真实模式：
+  deepseek-flash
     → deepseek-v4-pro      同厂商内降级，语义差异最小
-      → openai            跨厂商兜底
+      → openai            跨厂商兜底（配了 OPENAI_API_KEY 才进入链）
         → heuristicSummary 本地启发式，永远不会返回空白
 ```
 
@@ -264,14 +270,383 @@ refresh token  7 天    httpOnly cookie，服务端存哈希并轮换
 
 ---
 
-## 八、中间件不是安全边界
+## 八、proxy 不是安全边界（Next.js 16 的 middleware→proxy 迁移）
 
-`src/middleware.ts` 运行在 Edge Runtime，**无法访问 Prisma**，
-所以它只能做「乐观检查」：判断 cookie 是否存在。
+Next.js 16 起，`middleware.ts` 文件约定被标记弃用，新约定是根目录/`src` 下的
+`proxy.ts`；并且 **Proxy 固定运行在 Node.js runtime**，不允许导出 `runtime`。
+本项目按 16.4.0 的本地源码核实后迁移，依据与限制见
+[src/proxy.ts](../src/proxy.ts) 顶部注释。
 
-真正的鉴权在每个 API 路由里（`requireUserId` → 验签 → 查 DB）。
+迁移后仍然坚持同一个原则：
 
-**middleware 是体验优化，不是安全边界。**
-绕过 middleware 直接打 API 就能进去 —— 如果把安全建立在它上面，那就是个漏洞。
+- **proxy 只做乐观检查**：判断 access cookie 是否存在、是否需要跳登录页；
+- **真正的鉴权在每个 API 路由**（`requireUserId` → 验签 → 查 DB）；
+- 判据必须两处一致。历史上 proxy 把 refresh cookie 也算作「已登录」，
+  与 layout 判据不一致，直接造成 `ERR_TOO_MANY_REDIRECTS` 死循环 ——
+  所以现在两处都只看 access cookie。
 
-两层都要有，缺一不可。
+**proxy 是体验优化，不是安全边界。** 绕过 proxy 直接打 API 就能进去 ——
+把安全建立在它上面就是个漏洞。两层都要有，缺一不可。
+
+### CSP 与安全响应头的真实状态
+
+- 安全头集中在 [src/lib/security/headers.ts](../src/lib/security/headers.ts)：`nosniff`、
+  `X-Frame-Options: DENY`、`Referrer-Policy`、`Permissions-Policy`；
+- HSTS **只在生产**发送，且实际生效依赖反代正确终止 TLS（本仓库无法自证）；
+- CSP 目前是 **Report-Only**：违规只打 console、不阻断。`script-src` 含
+  `'unsafe-inline'`、没有 nonce —— 原因是 nonce 方案需要读 `headers()`，
+  会把整站从静态渲染变成动态渲染、让 CDN 缓存失效，这属于架构级变更，
+  不该混在「补安全头」里悄悄做。收紧到 Enforce 的前提写在 headers.ts 注释里；
+- 重定向响应也会带安全头（旧实现只给放行响应加），使「所有出站响应都有安全头」
+  成为可测试的不变式（`tests/security-headers.test.ts`）。
+
+> 诚实声明：这**不是一次安全审计**。CSP 未 enforce、proxy 不是边界、HSTS 依赖部署形态，
+> 这些都在「已知限制」里明说。
+
+---
+
+## 九、系统架构（验证过的部署形态）
+
+```mermaid
+flowchart LR
+    B["浏览器<br/>React 19 客户端组件"] -->|"HTTPS / 同源 httpOnly cookie"| N["Next.js 16 App Router<br/>Route Handlers（Node runtime）"]
+
+    subgraph APP["应用进程"]
+        P["proxy.ts<br/>乐观 cookie 检查 + 安全头"]
+        A["API 层<br/>鉴权 / 幂等 / 配额 / 限流"]
+        G["任务管线<br/>pipeline + agent"]
+        O["instrumentation.ts<br/>OTel tracing"]
+    end
+
+    N --> P
+    P --> A
+    A --> G
+    A -.-> DB[("PostgreSQL 16<br/>Prisma 7 + adapter-pg")]
+    G -.-> DB
+    A -.-> RL["限流 store<br/>memory（默认）| redis"]
+    RL -.-> R[("Redis 7<br/>可选，本机未安装")]
+    G --> LLM["LLM Provider<br/>DeepSeek / OpenAI / Mock"]
+    G -.-> O
+    O --> T["trace 导出<br/>JSONL 文件（默认）/ OTLP（未接 Collector）"]
+    B <-.->|"SSE: meta / token / step / usage / done / error"| N
+```
+
+要点：
+
+- **单实例部署**（Docker Compose 或 standalone）下 `after()` 是单机异步执行；
+  Serverless 只适合短任务，多实例**没有**队列/租约/全局重试（见 ADR-0005）；
+- Redis 只在 `RATE_LIMIT_DRIVER=redis` 时参与，**本机未安装**，真实连通性未验证；
+- OTLP 导出代码存在，但本环境没有 Collector，端到端未验证；默认 JSONL 落盘
+  `.lumenote-data/traces/`（已 gitignore）。
+
+---
+
+## 十、创建任务 → after() → SSE 时序
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 浏览器
+    participant API as "POST /api/tasks"
+    participant DB as PostgreSQL
+    participant Q as "after() 回调"
+    participant S as "GET /api/tasks/:id/stream"
+
+    U->>API: POST 建任务（Idempotency-Key 请求头）
+    API->>API: 鉴权 + 用户/IP 限流
+    API->>DB: 幂等键查重
+    alt 未命中幂等键
+        API->>DB: 并发上限 + 每日配额检查
+        API->>DB: 写 Task(status=queued) + Prompt 版本/参数快照
+        API-->>U: 200 { taskId }（实测 < 200ms，不等 LLM）
+        API->>Q: 响应完成后执行管线
+        U->>S: 订阅 SSE（可带 Last-Event-ID 断线重连）
+        S->>DB: 读取任务状态
+        Q->>DB: status=running
+        Q->>DB: 成功：outputContent + UsageLog（taskId 唯一结算一次）
+        Q->>DB: 失败：errorCode/errorMessage + 终态
+        loop 每 300ms（最长 10 分钟）
+            S->>DB: 轮询增量
+            S-->>U: token / step / usage
+        end
+        S-->>U: done（succeeded / failed / running=超时可重连）
+    else 命中幂等键
+        API-->>U: 200 { taskId, replayed: true }（不产生任何 LLM 调用）
+    end
+```
+
+**必须一起讲的边界**：
+
+- 状态机是 `queued → running → succeeded / failed`；`canceled` 目前**不可达**
+  （没有对外取消接口，`after()` 未传 `AbortSignal`）；
+- 管线**只在终态写 `outputContent`**，执行中不落增量 —— 崩溃后已生成内容会丢失（ADR-0005 承认）；
+- 幂等只防「同一个 key」，客户端每次点生成都是新 key，所以还要靠并发上限；
+- SSE 的 Mock 兜底执行（原子抢占 `queued → running`）是演示手段，不是队列。
+
+---
+
+## 十一、Agent 状态机与证据链
+
+```mermaid
+stateDiagram-v2
+    [*] --> plan
+    plan --> act: 模型返回工具调用
+    plan --> finalize: 模型返回纯文本结论
+    act --> observe: 执行工具（额度 / 重复检测）
+    observe --> plan: 预算仍充足
+    observe --> give_up: 检测到重复循环 / 单工具额度用尽
+    plan --> give_up: 步数或 token 预算到顶
+    finalize --> [*]: Task succeeded + structured 结论
+    give_up --> [*]: Task succeeded + degraded=true（阶段性结论）
+
+    note right of act
+        工具全部只读
+        list_sections / search_chunks /
+        fetch_url / get_glossary / diff_with_task
+    end note
+    note right of finalize
+        checkEvidence 校验 chunk:N 存在
+        且 quote 真在分块原文中
+    end note
+```
+
+拆解：
+
+- **控制权在代码**：模型只在 `plan` 阶段决定「调哪个工具 / 给结论」，状态转移由规则决定；
+- **双预算**：`maxSteps`（6/12/20）+ `maxTokens`；单工具额度（如 `search_chunks` ≤ 10）；
+- **重复检测**：相同工具+相同参数第 2 次提醒、第 3 次由代码强制收敛（不让模型的后续行为
+  覆盖 `stopReason`）；
+- **`give_up` ≠ `failed`**：到顶时交回阶段性结论并标 degraded，而不是让用户白等白花钱；
+- **证据校验是确定性的**：`checkEvidence()` 只判断「引文是否真在 `chunk:N` 里」，
+  不需要 LLM judge、零成本。
+
+模块拆分：`loop.ts` 从 968 行降为 **43 行门面**（re-export），职责落到
+`orchestrator / budget / tool-dispatch / evidence / output / trajectory / types`，
+依赖单向。行为不变由 characterization tests 锁定。
+
+---
+
+## 十二、核心数据模型
+
+```mermaid
+erDiagram
+    USER ||--o{ TASK : owns
+    USER ||--o{ PROMPT_TEMPLATE : owns
+    USER ||--o{ USAGE_LOG : consumes
+    USER ||--o{ EVAL_DATASET : owns
+    USER ||--o{ EVAL_RUN : owns
+    PROMPT_TEMPLATE ||--o{ PROMPT_VERSION : versions
+    PROMPT_TEMPLATE ||--o{ TASK : used_by
+    PROMPT_VERSION ||--o{ TASK : pinned_as
+    TASK ||--o| USAGE_LOG : settled_by
+    TASK ||--o{ AGENT_STEP : has
+    TASK ||--o{ KNOWLEDGE_CHUNK : chunks
+    TASK ||--o| SHARE_LINK : shares
+    EVAL_DATASET ||--o{ EVAL_CASE : contains
+    EVAL_RUN ||--o{ EVAL_CASE_RESULT : results
+    EVAL_CASE ||--o{ EVAL_CASE_RESULT : evaluated_in
+
+    USER {
+        string id PK
+        string email UK
+        string passwordHash
+        int dailyQuota
+        boolean emailVerified
+    }
+    TASK {
+        string id PK
+        string userId FK
+        string type
+        string status
+        string templateId FK
+        string promptVersionId FK
+        string idempotencyKey
+        json params
+        string outputContent
+        json outputMeta
+        int latencyMs
+        boolean degraded
+        datetime deletedAt
+    }
+    PROMPT_TEMPLATE {
+        string id PK
+        string userId FK
+        string slug
+        json variables
+        boolean isActive
+    }
+    PROMPT_VERSION {
+        string id PK
+        string templateId FK
+        int version
+        string systemPrompt
+        string userPromptTemplate
+        json params
+        string status
+    }
+    USAGE_LOG {
+        string id PK
+        string taskId UK
+        string provider
+        string model
+        int promptTokens
+        int completionTokens
+        int cachedTokens
+        float estimatedCost
+    }
+    AGENT_STEP {
+        string id PK
+        string taskId FK
+        int seq
+        string phase
+        json toolCalls
+        json toolResults
+    }
+    KNOWLEDGE_CHUNK {
+        string id PK
+        string taskId FK
+        int seq
+        string content
+    }
+    SHARE_LINK {
+        string id PK
+        string taskId UK
+        string token UK
+        datetime expiresAt
+        datetime revokedAt
+    }
+    EVAL_DATASET {
+        string id PK
+        string userId FK
+        string name
+    }
+    EVAL_CASE {
+        string id PK
+        string datasetId FK
+        string input
+    }
+    EVAL_RUN {
+        string id PK
+        string userId FK
+        string datasetId FK
+        string status
+    }
+    EVAL_CASE_RESULT {
+        string id PK
+        string runId FK
+        string caseId FK
+        float score
+    }
+```
+
+四个「可追溯」相关的约束（字段名以 [prisma/schema.prisma](../prisma/schema.prisma) 为准）：
+
+1. `Task.promptVersionId` + `Task.params` 是**创建时快照**，改 Prompt/术语表不改变历史；
+2. `UsageLog.taskId @unique` 是「一个任务只结算一次」的数据库级幂等；
+3. `Task @@unique([userId, idempotencyKey])` 是防重复建任务的最终防线；
+4. `AgentStep @@unique([taskId, seq])` 保证轨迹回放可信（第 3 步出现两次，回放就是错的）。
+
+---
+
+## 十三、限流：双驱动与多实例边界
+
+旧实现是「进程内存 Map + 同步函数」，只能做每实例限流。现在把计数后端抽象成
+`RateLimitStore`（[src/lib/rate-limit/](../src/lib/rate-limit/)）：
+
+- `memory`（默认）：本地/单实例，以及 Redis 故障时的降级目标；
+- `redis`：Lua 原子 `INCR + PEXPIRE` 计数，多实例共享；
+- `RATE_LIMIT_FAIL_MODE=open|closed`：Redis 故障时回退内存（可用性优先）
+  或直接 429（安全优先），两种都不把异常冒到业务层；
+- `TRUST_PROXY_HOPS`：默认 0，**不信任任何 `X-Forwarded-For`**（所有请求共享 `unknown` 桶，
+  防伪造但无法区分客户端）；部署在反代后必须按层数配置，且应用端口只对代理开放。
+
+**多实例边界必须诚实**：限流计数可以共享，但 **LLM 熔断器仍是进程内存**
+（[src/lib/llm/breaker.ts](../src/lib/llm/breaker.ts)），多实例下各实例独立打开熔断。
+不要把它讲成完整的分布式可靠性方案。
+
+验证状态：memory driver 与 fake Redis client 有单测；`pnpm test:redis` 在本机输出
+`SKIPPED`（退出码 2，无 Redis）；真实 Redis 只在 CI 的 `rate-limit-redis` job 中配置，
+而该 job **从未在 GitHub 实际运行过**（仓库没有 remote）。
+
+---
+
+## 十四、可观测性
+
+- `src/instrumentation.ts` 初始化 OTel，**任何失败只 warn、不阻塞启动**；
+- span 命名即查询接口：`task.pipeline / task.lifecycle / task.persist / llm.request /
+  agent.plan / agent.tool / agent.observe / agent.finalize / agent.evidence_check`；
+- `taskId` 通过 OTel Context（AsyncLocalStorage）贯穿，**不用全局变量** ——
+  Next 并发处理多个任务，全局变量会把 A 任务的 taskId 写到 B 任务的 span 上；
+- 默认 JSONL 导出到 `.lumenote-data/traces/`（gitignore），`TRACE_EXPORT=otlp` 需自备 Collector；
+- 生产默认关闭：trace 落盘会产生磁盘 IO 与用户内容的本地副本（已脱敏），应由运维显式开启；
+- 脱敏：不落 API Key / 完整 prompt / 文档正文，只留长度与哈希，另有属性键黑名单与
+  `sk-...` 值级兜底（[src/lib/observability/sanitize.ts](../src/lib/observability/sanitize.ts)）；
+- 指标聚合 `src/lib/observability/metrics.ts` 直接从数据库查询 p50/p95、token/成本、
+  工具失败率、证据完整率、失败/超时率，口径写在 `METRIC_DEFINITIONS`。
+
+**未验证**：OTLP 端到端（无 Collector）；trace 只验证过 JSONL 落盘与 span 结构。
+
+---
+
+## 十五、测试体系：单测、集成、覆盖率
+
+| 层 | 命令 | 覆盖什么 | 环境要求 |
+|---|---|---|---|
+| 单测 | `pnpm test` | 纯逻辑：分块/计价/SSRF/护栏/重试/渲染/模板/加解密/限流 store/observability | 无（不连库、不联网） |
+| 集成 | `pnpm test:integration` | 真实 Postgres + 真实 HTTP：空库迁移、seed 幂等、越权、幂等键、配额、状态机、SSE 重连、Agent、追问、分享 | 需 PostgreSQL 16 的测试库（harness 会 DROP schema 后迁移 + seed + 起 `next dev`） |
+| 覆盖率 | `pnpm test:coverage` | **只统计 `src/lib/**` 的纯逻辑**，不代表整体验证程度 | 无 |
+
+集成测试的关键设计（[tests/integration/global-setup.ts](../tests/integration/global-setup.ts)）：
+
+- 被测应用用 `next dev` 真跑，而不是 mock 掉路由：两段式/SSE 的坑全在跨请求生命周期里；
+- `TRUST_PROXY_HOPS=1` + 每个测试用户独占 `X-Forwarded-For`，避免注册限流互相挤占；
+- **同一 worktree 同时只能有一个 `next dev`**（Next 16 有「Another next dev server is already
+  running」的 per-project 锁）—— 所以跑集成测试前要先停掉 `pnpm dev`；
+- 集成测试会 **DROP `DATABASE_URL` 指向库的 public schema**，必须指向测试库，
+  绝不要指向开发库。
+
+覆盖率现状（2026-10-20 实测，31 文件 / 656 单测）：
+
+```
+All files | statements 40.67 | branches 82.81 | functions 72.22 | lines 40.67
+```
+
+`vitest.config.ts` 的防倒退阈值是 36 / 83 / 70 / 36 —— **branches 82.81% 低于 83% 阈值，
+当前 `pnpm test:coverage` 退出码 1**。这是一个真实的红灯：本仓库没有为了让数字好看
+去调低阈值，也没有把它藏起来（详见 README 的验证状态表）。
+
+---
+
+## 十六、部署链路与验证状态
+
+部署设计（[Dockerfile](../Dockerfile) + [docker-compose.yml](../docker-compose.yml)）：
+
+```mermaid
+flowchart TB
+    subgraph BUILD["镜像构建（多阶段）"]
+        BASE["base: node:22-alpine + pnpm 10.33.2"]
+        DEPS["deps: pnpm install --frozen-lockfile"]
+        BUILDER["builder: prisma generate + next build（BUILD_STANDALONE=true）"]
+        MIGRATOR["migrator: prisma CLI + schema + migrations"]
+        RUNNER["runner: standalone + static + public<br/>非 root（uid 1001）"]
+        BASE --> DEPS --> BUILDER
+        BASE --> MIGRATOR
+        BUILDER --> RUNNER
+    end
+    MIGRATOR -->|"docker compose run --rm migrate"| PG[("postgres:16-alpine")]
+    RUNNER -->|"docker compose --profile app up -d app"| PG
+    RUNNER --> REDIS[("redis:7-alpine（可选）")]
+```
+
+三步启动（迁移只执行一次，不在 app entrypoint 里）：
+
+```bash
+docker compose up -d postgres redis     # 1. 依赖就绪（healthcheck）
+docker compose run --rm migrate         # 2. 一次性迁移，非 0 退出则中止
+docker compose --profile app up -d app  # 3. 启动应用（只连库，不碰 schema）
+```
+
+**⚠️ 本环境没有安装 Docker**：`docker build` / `docker compose config` / `docker run`
+**均未运行**。替代验证是 standalone 产物按镜像同款布局启动 `node server.js`（20/20 断言，
+`/api/health` 200 且 `db.ok=true`）+ PyYAML 静态校验（51/51 项）。详见
+[ADR-0005](adr/0005-async-execution-boundary.md) 的「验证」一节。
