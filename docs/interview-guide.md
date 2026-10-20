@@ -136,6 +136,11 @@ seed 的演示 Agent 任务（[prisma/seed.ts](../prisma/seed.ts)）写了 3 条
 `orchestrator / budget / tool-dispatch / evidence / output / trajectory / types`，
 依赖单向。行为不变由 characterization tests 锁定（`tests/agent-loop.test.ts` + `tests/agent/**`）。
 
+⚠️ **别把「968 → 43」讲成复杂度下降 90%**：43 行只是门面，真实状态机在
+[orchestrator.ts](../src/lib/agent/orchestrator.ts)（约 570 行）。拆分的收益是
+职责分离、单向依赖、每个模块可独立单测（`tests/agent/*`），不是代码总量变少 ——
+面试官追问「那复杂度去哪了」时，直接指 orchestrator.ts。
+
 ---
 
 ## 4. 幂等、配额、越权、BYOK
@@ -152,9 +157,14 @@ seed 的演示 Agent 任务（[prisma/seed.ts](../prisma/seed.ts)）写了 3 条
 
 ### 成本三道闸
 
-- 每日配额（按任务数，不用 token 数：用户理解「20 次/天」）
-- 并发上限（同一用户同时 1 个进行中任务；BYOK 同样受限，保护的是用户自己的钱包）
-- 峰值计价 + 缓存分档（[src/lib/llm/pricing.ts](../src/lib/llm/pricing.ts)）
+覆盖**所有会真实调用模型的创建路径**（tasks / agent / followup）：
+
+- 每日配额（按任务数，不用 token 数：用户理解「20 次/天」）；
+  追问以父任务的 `credentialId` 快照判定 BYOK —— 用自己的 key 不占站点配额；
+- 并发上限（同一用户同时 1 个进行中任务；BYOK 同样受限，保护的是用户自己的钱包）；
+- 峰值计价 + 缓存分档（[src/lib/llm/pricing.ts](../src/lib/llm/pricing.ts)）。
+- 追问目前**没有幂等键**（双击/网络重试会重复扣费），属已知取舍；
+  `RATE_LIMIT_PER_MINUTE`（`rateLimitByIp`）也**未接入路由**，实际生效的是按用户/按 IP 的 auth 桶。
 
 **已知竞态**：配额是「先查后写」，并发提交理论上可绕过，靠并发上限与限流把窗口压小。
 彻底修法是把「检查 + 插入」放进 `Serializable` 事务或用户级咨询锁 —— 未做。
@@ -186,9 +196,17 @@ seed 的演示 Agent 任务（[prisma/seed.ts](../prisma/seed.ts)）写了 3 条
   （`pnpm test:redis`，Redis 不可用时打印 SKIPPED 并以**退出码 2** 结束 —— 没验证 ≠ 通过）。
 - **故障策略可选**：`RATE_LIMIT_FAIL_MODE=open` 回退内存（可用性优先）、
   `closed` 直接 429（安全优先）。两种都不把异常冒到业务层。
+  ⚠️ `open` 有延迟代价：Redis **挂死**（TCP 无响应）时每个请求可能先等
+  `connectTimeout`（2s 量级）再降级 —— 保可用，不保低延迟。
 - **信任边界 `TRUST_PROXY_HOPS`**：默认 0，完全不信任 `X-Forwarded-For`；
   部署在反向代理后**必须按实际层数配置**，否则所有客户端共享 `unknown` 限流桶
   （表现：别人请求多了你也 429）。设 >0 的前提是应用端口只对可信代理开放。
+  ⚠️ 反过来说，默认 0 也有代价：攻击者打满全局 auth 桶（login 30/5min、
+  register+verification 5/5min）就能让**所有人**登录/注册 429 —— 这是一个低成本的全局 DoS 面，
+  直连公网时必须保持 0，反代后按层数设置并只对代理开放端口。
+- ⚠️ `RATE_LIMIT_PER_MINUTE`（`rateLimitByIp()`）**当前没有路由调用**，
+  只是保留给限流 store / 后续接入；实际生效的是 auth 与任务创建维度的限流桶。
+  不要把它讲成已生效的全局限流。
 
 ### 诚实的多实例结论
 
@@ -232,9 +250,13 @@ seed 的演示 Agent 任务（[prisma/seed.ts](../prisma/seed.ts)）写了 3 条
    - Redis 未安装 → 真实限流未连过，只有 fake-client 单测；CI 的 `rate-limit-redis` job 从未在 GitHub 跑过；
    - 真实模型评测未运行、零费用；judge 未校准；
    - 仓库没有 remote，CI workflow 只用 actionlint + PyYAML 校验过 YAML。
-8. **覆盖率门槛当前不达标**：实测 branches 82.81% < `vitest.config.ts` 阈值 83%，
-   `pnpm test:coverage` 以退出码 1 结束（statements/lines 40.67、functions 72.22）。
-   这是**真实红灯**，不是"接近通过"。
+8. **追问（`POST /api/followup`）没有幂等键**：双击/网络重试会重复创建子任务并重复扣费；
+   「同一问题问两次就该跑两次」是产品语义，但网络重试属于同一意图，目前靠前端禁用按钮缓解。
+9. **`RATE_LIMIT_PER_MINUTE` 未接入路由**：`rateLimitByIp()` 没有调用点，
+   该值仅保留给限流 store；实际生效的是 auth 与任务创建维度的桶。
+10. **生产必须用 resend 邮件通道**：`console` 在生产环境不发信也不回传验证码 → 新用户无法注册。
+11. **seed 的演示账号是固定密码**：`demo@lumenote.dev / Lumenote2026!` 仅演示环境可用；
+    生产不要跑 seed，或跑完删除/改密。
 
 ### 如果重做，会优先改什么
 
@@ -303,5 +325,8 @@ Mock 报告里的成本是估算、不是账单；真实账单要等真实模型
 
 **Q10：这个项目哪里还没做完？**
 按诚实优先级回答：外部队列/增量落库/取消 API、CSP 未 enforce、熔断未分布式、
-配额竞态、Docker/Redis/真实模型/CI 全部未在本环境实际运行、覆盖率 branches 当前低于阈值。
+配额竞态、追问无幂等键、`RATE_LIMIT_PER_MINUTE` 未接入路由、
+Docker/Redis/真实模型/CI 全部未在本环境实际运行。
+覆盖率只统计 `src/lib/**`（当前 41.03/82.90/71.64/41.03，阈值 41/82/71/41，`pnpm test:coverage` 退出码 0），
+它不代表整体验证程度。
 「没跑过的验证不写进简历，只写进已知限制」—— 这本身就是这个项目想表达的工程态度。
