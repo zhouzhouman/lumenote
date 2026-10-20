@@ -45,7 +45,7 @@ export async function POST(req: Request) {
     const ip = clientIp(req.headers);
     const userAgent = req.headers.get('user-agent') ?? undefined;
 
-    const rl = rateLimitAuthByIp(ip, 'register');
+    const rl = await rateLimitAuthByIp(ip, 'register');
     if (!rl.ok) {
       return fail('RATE_LIMITED', `请求过于频繁，请 ${rl.retryAfterSec} 秒后重试`, 429);
     }

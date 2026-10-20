@@ -42,7 +42,7 @@ export async function POST(req: Request) {
     const context = { ip, userAgent };
 
     // ---- 第 1 层：IP 限流 ----
-    const ipLimit = rateLimitAuthByIp(ip, 'login');
+    const ipLimit = await rateLimitAuthByIp(ip, 'login');
     if (!ipLimit.ok) {
       return fail('RATE_LIMITED', `尝试过于频繁，请 ${ipLimit.retryAfterSec} 秒后重试`, 429);
     }
@@ -51,7 +51,7 @@ export async function POST(req: Request) {
     const email = normalizeEmail(body.email);
 
     // ---- 第 2 层：账号维度限流（防针对特定账号的撞库）----
-    const userLimit = rateLimitByUser(email, 'auth:login');
+    const userLimit = await rateLimitByUser(email, 'auth:login');
     if (!userLimit.ok) {
       return fail('RATE_LIMITED', '该账号尝试次数过多，请稍后再试', 429);
     }

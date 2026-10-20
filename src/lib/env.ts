@@ -18,6 +18,18 @@ const intFromEnv = (def: number) =>
     .transform((v) => (v === undefined || v === '' ? def : Number(v)))
     .pipe(z.number().int().positive());
 
+/**
+ * 允许 0 的整数（例如「信任 0 层代理」）。
+ *
+ * 不能复用 intFromEnv：它要求 positive，而 0 是这里最有意义的取值。
+ */
+const nonNegativeIntFromEnv = (def: number) =>
+  z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined || v === '' ? def : Number(v)))
+    .pipe(z.number().int().min(0));
+
 const serverSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL 不能为空'),
   DIRECT_URL: z.string().optional(),
@@ -40,6 +52,59 @@ const serverSchema = z.object({
 
   FREE_DAILY_QUOTA: intFromEnv(20),
   RATE_LIMIT_PER_MINUTE: intFromEnv(10),
+
+  // ---------- 限流后端（新增，全部可选）----------
+  /**
+   * 限流后端：`memory`（默认）| `redis`。
+   *
+   * memory = 进程内存，单实例/本地开发够用；重启即清零，多实例之间不共享。
+   * redis  = 多实例共享计数（需要 REDIS_URL）。选择是**启动期**决定，运行中不热切换。
+   */
+  RATE_LIMIT_DRIVER: z
+    .enum(['memory', 'redis'])
+    .optional()
+    .transform((v) => v ?? 'memory'),
+  /** Redis 连接串。只有 RATE_LIMIT_DRIVER=redis 时才会真正连接 */
+  REDIS_URL: z
+    .string()
+    .optional()
+    .transform((v) => v?.trim() || 'redis://127.0.0.1:6379')
+    .pipe(z.string().url()),
+  /**
+   * Redis 计数 key 前缀。
+   *
+   * 多个环境（生产/预发/本地）共用一个 Redis 时必须区分，否则计数会互相污染。
+   */
+  RATE_LIMIT_REDIS_PREFIX: z
+    .string()
+    .optional()
+    .transform((v) => v?.trim() || 'lumenote:rl:'),
+  /**
+   * Redis 故障时的降级策略：`open`（默认）| `closed`。
+   *
+   * - open：本次请求降级到进程内存限流，记录 warn，业务不中断。
+   *   代价是故障期间多实例限流退化为「每实例限流」，比完全放行严格，但弱于全局。
+   * - closed：拒绝本次请求（调用方按 429 处理）。安全优先、可用性让位，
+   *   适用于「宁可全站拒绝，也不能让限流失效」的场景。
+   *
+   * ⚠️ 两种模式都不会把异常抛到业务层。closed 的返回是明确的 ok:false。
+   */
+  RATE_LIMIT_FAIL_MODE: z
+    .enum(['open', 'closed'])
+    .optional()
+    .transform((v) => v ?? 'open'),
+  /**
+   * 可信反向代理层数（X-Forwarded-For 信任边界）。
+   *
+   * 0（默认）= 不信任任何转发头：XFF / x-real-ip 一律忽略，返回常量 `unknown`。
+   *   此时所有请求共享一个「unknown」桶 —— 无法被伪造绕过，但多客户端会互相挤占。
+   * N > 0  = 从 XFF 右往左数第 N 个地址作为客户端 IP（客户端在最左，代理逐跳追加）。
+   *   nginx 单层代理通常设 1；Cloudflare + nginx 两层设 2。
+   *
+   * ⚠️ 设置 N > 0 的前提：应用端口只对可信代理开放（否则直连者可以伪造 XFF）。
+   */
+  TRUST_PROXY_HOPS: nonNegativeIntFromEnv(0),
+
   MAX_CONCURRENT_TASKS_PER_USER: intFromEnv(1),
 
   MAX_INPUT_CHARS: intFromEnv(100_000),
