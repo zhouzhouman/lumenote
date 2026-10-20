@@ -14,6 +14,10 @@ Lumenote 是「可追溯的 AI 文本工作台」。这份文档只写**必须�
 | pnpm | 10.33.2 | 以 `package.json` 的 `packageManager` 为唯一事实来源，推荐 `corepack enable` |
 | PostgreSQL | 16 | 本地需监听 `127.0.0.1:5432` |
 
+> **pnpm 版本只有一个来源**：`package.json` 的 `packageManager`（当前 `pnpm@10.33.2`）。CI 从该字段动态读取版本，Dockerfile 也使用同一版本；不要在本地额外安装别的 pnpm 版本，也不要让 `corepack` 之外的包管理器改写 lockfile。
+>
+> **依赖构建脚本白名单只有一个来源**：`package.json` 的 `pnpm.onlyBuiltDependencies`（当前放行 `@prisma/engines`、`prisma`、`esbuild`、`unrs-resolver`）。pnpm 10.33 不再读取 `.npmrc` 里的 `onlyBuiltDependencies[]` 写法（实测无效），因此 `.npmrc` 只保留说明注释，不要在那里重新添加。
+
 > 本项目**不需要** Docker 即可开发与测试；`docker-compose.yml` 只是可选的本地库方案，镜像构建只在 main 分支的发布流程里发生。
 
 ### 首次启动
@@ -38,6 +42,7 @@ pnpm dev
 | `pnpm test` | 单元测试（纯逻辑，不连 DB / 不连网络） |
 | `pnpm test:coverage` | 单元测试 + 覆盖率报告（产物在 `coverage/`） |
 | `pnpm test:integration` | 集成测试（需要真实 Postgres，见 CI 配置） |
+| `pnpm test:redis` | 真实 Redis 限流验证；0=通过，1=失败，**2=Redis 不可用而 SKIPPED** |
 | `pnpm build` | 生产构建（含 `prisma generate`） |
 | `pnpm verify:all` | 本地一次性跑完质量门禁（validate + typecheck + lint + test + build） |
 
@@ -89,10 +94,30 @@ PR 合并前以下检查必须在 CI 中通过（对应 `.github/workflows/ci.ym
 | Lint | `pnpm lint` | 必须通过（0 warning） |
 | 单元测试 | `pnpm test` | 必须通过 |
 | 生产构建 | `pnpm build` | 必须通过 |
-| 集成测试 | `pnpm test:integration` | 必须通过（Postgres 16 service） |
-| 覆盖率 | `pnpm test:coverage` | 产出 `coverage/` artifact；阈值在测试配置中维护 |
+| 集成测试 | `pnpm test:integration` | 必须通过（Postgres 16 service；harness 自行 DROP schema/migrate/seed 并起 next dev） |
+| Redis 限流验证 | `pnpm test:redis` | 必须通过（真实 `redis:7-alpine` service；退出码 2=SKIPPED 同样判失败） |
+| 覆盖率 | `pnpm test:coverage` | 产出 `coverage/` artifact；阈值在 `vitest.config.ts` 维护，未达标会让 job 失败 |
 | 依赖审查 | `actions/dependency-review-action` | 仅在 PR，high 及以上阻断 |
 | 凭据扫描 | `gitleaks dir`（固定版本 CLI） | 有疑似凭据即阻断 |
+
+### CI job 一览
+
+| job | 触发 | 依赖服务 | 说明 |
+| --- | --- | --- | --- |
+| `verify` | push / PR 到 main | 无 | prisma validate → generate → typecheck → lint → test → build（全部使用假环境变量，不连库） |
+| `integration` | push / PR 到 main | Postgres 16 | globalSetup：DROP schema → migrate deploy → seed → next dev → 等 `/api/health`；**不需要先 build** |
+| `rate-limit-redis` | push / PR 到 main | Redis 7 | `pnpm test:redis`：Lua 脚本、并发原子计数、TTL/窗口恢复；SKIPPED(2) 视为失败 |
+| `coverage` | push / PR 到 main | 无 | `pnpm test:coverage`，阈值未达标 → vitest 非 0 → job 失败；报告始终上传 |
+| `dependency-review` | 仅 PR | 无 | 依赖变更审查，高危阻断；不需要任何预配置 secret |
+| `secret-scan` | push / PR 到 main | 无 | gitleaks 固定版本 CLI 扫工作树（非全量历史，见 §5 局限） |
+| `docker-publish` | 仅 push main / 手动触发 | 无 | 独立 workflow；不会在 PR 运行；缺 Registry Secrets 时跳过而不失败 |
+
+### 本地复现 CI 的服务型检查
+
+CI 里需要真实服务的检查，本地可以这样复现（**不要指向开发库**）：
+
+- **集成测试**：本地 PostgreSQL 16 监听 `127.0.0.1:5432`，用户/密码/库名 `lumenote`，测试库 `lumenote_test`。`pnpm test:integration` 的 globalSetup 会 `DROP SCHEMA public CASCADE` 后重新迁移并 seed，所以 `DATABASE_URL` 必须指向测试库。
+- **Redis 限流**：需要有可达 Redis（`docker compose up -d redis`，或本机 `redis-server`），然后 `pnpm test:redis`。没有 Redis 时脚本会打印 `[SKIPPED]` 并以**退出码 2** 结束 —— 这表示「没有验证」，不是「验证通过」。
 
 约定：
 
