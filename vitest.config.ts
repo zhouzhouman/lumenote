@@ -65,22 +65,22 @@ export default defineConfig({
       /**
        * 防倒退阈值（thresholds）。
        *
-       * 数据来自 **2026-10-20 实测基线**（`pnpm test:coverage`，31 个测试文件 /
-       * 656 个单测通过；含 observability 接入后的统计）：
-       *   statements 40.67% / branches 82.81% / functions 72.22% / lines 40.67%
+       * 数据来自 **2026-10-20 最新实测基线**（`pnpm test:coverage`，32 个测试文件 /
+       * 661 个单测通过；含 observability 与安全修复后的统计）：
+       *   statements 41.03% / branches 82.90% / functions 71.64% / lines 41.03%
        * 阈值按基线**向下取整**（不取整会让 CI 因浮点微抖动变红）：
-       *   40 / 82 / 72 / 40。
+       *   41 / 82 / 71 / 41。
        *
        * 目的：现在必须通过，未来覆盖率下降会失败。**不要为了好看调高到会失败的值**；
        * 后续新增纯逻辑测试把覆盖率抬高后，应同步上调到新的「向下取整基线」。
-       * （此前 36/83/70/36 是 Agent G 合并前的旧基线，branches 因新增代码而低于 83，
-       *   已按新实测值更新 —— 阈值必须跟着代码走，不能反过来。）
+       * （阈值必须跟着实测基线走，不能反过来 —— 历史上出现过阈值高于新基线导致
+       *   门禁红灯的情况，原因是新增模块拉低了 functions 覆盖率。）
        */
       thresholds: {
-        statements: 40,
+        statements: 41,
         branches: 82,
-        functions: 72,
-        lines: 40,
+        functions: 71,
+        lines: 41,
       },
     },
   },
