@@ -24,6 +24,8 @@ scripts/verify/.auth-seed.json
 # E2E 与浏览器测试的报告/快照产物
 playwright-report/
 test-results/
+# standalone 部署验证的临时布局（scripts/docker/verify-standalone.mjs --keep）
+.tmp-standalone/
 
 # ---- 工作树与本地实验产物 ----
 # 多 worktree 并行开发时用来隔离工作区

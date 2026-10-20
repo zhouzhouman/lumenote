@@ -282,6 +282,12 @@ async function main() {
   const childEnv = {
     ...process.env,
     ...envValues,
+    // ⚠️ 验证脚本**强制 mock**，无论 .env.local 写了什么：
+    //   在作者机器上 .env.local 往往配了真实 Key 且 MOCK_LLM=false，
+    //   若照搬就会让一次「部署验证」产生真实费用。这里显式覆盖并清空厂商 Key。
+    MOCK_LLM: 'true',
+    DEEPSEEK_API_KEY: '',
+    OPENAI_API_KEY: '',
     NODE_ENV: 'production',
     HOSTNAME: host,
     PORT: String(port),
