@@ -11,6 +11,13 @@ import {
 import { createToolDispatchState, dispatchToolCalls, resolveToolQuotas } from './tool-dispatch';
 import { parseStructuredOutput, extractDisplayText } from './output';
 import { StepRecorder } from './trajectory';
+import { checkEvidence } from './evidence';
+import {
+  currentTaskId,
+  setSpanAttributes,
+  withSpan,
+  withTaskSpan,
+} from '@/lib/observability/tracing';
 import type { AgentRunResult, AgentStopReason, RunAgentOptions } from './types';
 
 /**
@@ -140,14 +147,42 @@ function buildInitialUserMessage(question: string, chunks: RunAgentOptions['chun
 }
 
 /**
+ * `runAgent` 的扩展入参。
+ *
+ * `taskId` / `promptVersionId` **只用于 tracing 溯源**，不参与状态机逻辑：
+ * agent/runner.ts 会把任务快照传进来，单测与报告脚本也可以显式指定。
+ * 刻意不改 `RunAgentOptions`（types.ts 是公共契约，避免影响其它调用方）。
+ */
+export type RunAgentOptionsWithTrace = RunAgentOptions & {
+  taskId?: string;
+  promptVersionId?: string;
+};
+
+/**
  * 运行 Agent 循环。
  *
- * ⚠️ 这个函数**不碰数据库** —— 轨迹只作为返回值给出，由调用方决定怎么落库。
- * 这样它才能被单测直接覆盖（注入一个假的 provider 就能测状态机）。
- * 状态机的正确性（预算、额度、重复检测）必须能被测到，
- * 而这些逻辑一旦和数据库耦合就只能靠端到端测，成本和脆弱度都高得多。
+ * 可观测性：若调用方还没建立任务根 span（`currentTaskId()` 为空），
+ * 这里创建 `task.pipeline`（attributes 含 taskId/type/model/promptVersionId）。
+ * 如果外层（agent/runner.ts）已经建了根 span，则直接复用，避免双根。
  */
-export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
+export async function runAgent(opts: RunAgentOptionsWithTrace): Promise<AgentRunResult> {
+  if (currentTaskId()) {
+    return runAgentCore(opts);
+  }
+  return withTaskSpan(
+    'task.pipeline',
+    opts.taskId ?? 'unattributed',
+    {
+      type: 'agent',
+      model: opts.model,
+      ...(opts.promptVersionId ? { promptVersionId: opts.promptVersionId } : {}),
+    },
+    () => runAgentCore(opts),
+  );
+}
+
+async function runAgentCore(opts: RunAgentOptions): Promise<AgentRunResult> {
+  const runStartedAt = Date.now();
   const limits = resolveBudgetLimits(opts.budget);
   const quotas = resolveToolQuotas(opts.toolQuotas);
 
@@ -199,6 +234,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     usage.cachedTokens += u.cachedTokens;
   }
 
+  /** 第几轮 plan（trace 里用作 step 序号，与 StepRecorder 的 seq 解耦） */
+  let planStep = 0;
+
   for (;;) {
     // ---------- 预算检查 ----------
     const exhausted = budget.exhaustedReason();
@@ -223,18 +261,53 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
      * 「这一步花了多久」，而不是其中模型占了多少。
      */
     const stepStart = Date.now();
+    planStep += 1;
     let result: LLMResult;
     try {
-      result = await opts.provider.generate({
-        model: opts.model,
-        system,
-        prompt: '',
-        messages,
-        tools: AGENT_TOOLS,
-        thinking: opts.thinking ?? 'disabled',
-        temperature: opts.temperature,
-        maxTokens: opts.maxTokens ?? 4000,
-        signal: opts.signal,
+      result = await withSpan('agent.plan', { step: planStep }, async (planSpan) => {
+        const llmStart = Date.now();
+        try {
+          const llmResult = await withSpan(
+            'llm.request',
+            { phase: 'agent', model: opts.model, provider: opts.provider.name, step: planStep },
+            async (span) => {
+              try {
+                const generated = await opts.provider.generate({
+                  model: opts.model,
+                  system,
+                  prompt: '',
+                  messages,
+                  tools: AGENT_TOOLS,
+                  thinking: opts.thinking ?? 'disabled',
+                  temperature: opts.temperature,
+                  maxTokens: opts.maxTokens ?? 4000,
+                  signal: opts.signal,
+                });
+                setSpanAttributes(span, {
+                  inputTokens: generated.usage.inputTokens,
+                  outputTokens: generated.usage.outputTokens,
+                  durationMs: Date.now() - llmStart,
+                  attempt: 1,
+                });
+                return generated;
+              } catch (error) {
+                setSpanAttributes(span, { durationMs: Date.now() - llmStart, ok: false });
+                throw error;
+              }
+            },
+          );
+
+          setSpanAttributes(planSpan, {
+            toolCallCount: (llmResult.toolCalls ?? []).length,
+            inputTokens: llmResult.usage.inputTokens,
+            outputTokens: llmResult.usage.outputTokens,
+            durationMs: Date.now() - stepStart,
+          });
+          return llmResult;
+        } catch (error) {
+          setSpanAttributes(planSpan, { ok: false, durationMs: Date.now() - stepStart });
+          throw error;
+        }
       });
     } catch (e) {
       /**
@@ -306,6 +379,20 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     });
     messages.push({ role: 'tool', results: dispatched.toolMessages });
 
+    // ---------- observe（trace 节点：本轮工具执行后的判定依据） ----------
+    await withSpan(
+      'agent.observe',
+      {
+        step: planStep,
+        toolResultCount: dispatched.toolResults.length,
+        toolNames: [...new Set(dispatched.toolResults.map((r) => r.name))].join(','),
+        failCount: dispatched.toolResults.filter((r) => !r.ok).length,
+        hitQuota: dispatched.hitQuota,
+        hitRepeatStop: dispatched.hitRepeatStop,
+      },
+      async () => undefined,
+    );
+
     // ---------- observe → 决定是否继续 ----------
     if (dispatched.hitRepeatStop) {
       /**
@@ -354,26 +441,49 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     const wrapUpStart = Date.now();
 
     try {
-      const wrapUp = await opts.provider.generate({
-        model: opts.model,
-        system,
-        prompt: '',
-        messages: [
-          ...messages,
-          {
-            role: 'user',
-            content:
-              `${CONVERGE_REASON_TEXT[stopReason]}，不能再调用任何工具。\n` +
-              '请立即基于**已经检索到的内容**给出结论（JSON 格式）。\n' +
-              '如果信息不足以回答问题，就在 limitations 里明确写出缺什么 —— ' +
-              '给出部分答案比什么都给不出有价值得多。',
-          },
-        ],
-        // 刻意不传 tools：确保模型只能输出文本
-        thinking: opts.thinking ?? 'disabled',
-        maxTokens: opts.maxTokens ?? 4000,
-        signal: opts.signal,
-      });
+      const wrapUp = await withSpan(
+        'llm.request',
+        {
+          phase: 'agent',
+          model: opts.model,
+          provider: opts.provider.name,
+          finish: 'converge',
+          attempt: 1,
+        },
+        async (span) => {
+          try {
+            const generated = await opts.provider.generate({
+              model: opts.model,
+              system,
+              prompt: '',
+              messages: [
+                ...messages,
+                {
+                  role: 'user',
+                  content:
+                    `${CONVERGE_REASON_TEXT[stopReason]}，不能再调用任何工具。\n` +
+                    '请立即基于**已经检索到的内容**给出结论（JSON 格式）。\n' +
+                    '如果信息不足以回答问题，就在 limitations 里明确写出缺什么 —— ' +
+                    '给出部分答案比什么都给不出有价值得多。',
+                },
+              ],
+              // 刻意不传 tools：确保模型只能输出文本
+              thinking: opts.thinking ?? 'disabled',
+              maxTokens: opts.maxTokens ?? 4000,
+              signal: opts.signal,
+            });
+            setSpanAttributes(span, {
+              inputTokens: generated.usage.inputTokens,
+              outputTokens: generated.usage.outputTokens,
+              durationMs: Date.now() - wrapUpStart,
+            });
+            return generated;
+          } catch (error) {
+            setSpanAttributes(span, { durationMs: Date.now() - wrapUpStart, ok: false });
+            throw error;
+          }
+        },
+      );
 
       acceptUsage(wrapUp.usage);
       budget.recordUsage(wrapUp.usage);
@@ -402,7 +512,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
   const structured = parseStructuredOutput(finalText);
 
-  return {
+  const runResult: AgentRunResult = {
     status: errorMessage
       ? 'failed'
       : stopReason === 'model_finalized'
@@ -417,4 +527,44 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     finalChunks: chunks,
     ...(errorMessage ? { error: errorMessage } : {}),
   };
+
+  /**
+   * 终止阶段的两个 span。
+   *
+   * `agent.finalize` 记录「这次 Agent 以什么状态、花了多少 token 结束」；
+   * `agent.evidence_check` 嵌在它下面，记录「结论有没有依据」——
+   * 把「终止原因」与「结论质量」放在同一条 trace 里，
+   * 排查「为什么这次答案看起来不可信」时能直接看到证据率，而不是去翻数据库。
+   *
+   * 证据校验复用已有的纯函数 `checkEvidence`（与评测/UI 同一口径）。
+   */
+  return withSpan(
+    'agent.finalize',
+    {
+      status: runResult.status,
+      stopReason: runResult.stopReason,
+      stepCount: runResult.steps.length,
+      inputTokens: runResult.usage.inputTokens,
+      outputTokens: runResult.usage.outputTokens,
+      degraded: runResult.status !== 'succeeded',
+      durationMs: Date.now() - runStartedAt,
+    },
+    async () => {
+      const evidence = checkEvidence(runResult.structured, runResult.finalChunks);
+      const unsupported = (runResult.structured?.conclusions ?? []).filter(
+        (conclusion) => conclusion.evidence.length === 0,
+      ).length;
+      await withSpan(
+        'agent.evidence_check',
+        {
+          rate: evidence.rate,
+          total: evidence.total,
+          verified: evidence.verified,
+          unsupported,
+        },
+        async () => undefined,
+      );
+      return runResult;
+    },
+  );
 }

@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { computeCostUsd } from '@/lib/llm/pricing';
 import { estimateTokens } from '@/lib/llm/mock';
+import { LLMError } from '@/lib/llm/types';
 import {
   evaluateRuleAssertion,
   scoreCase,
@@ -186,12 +187,19 @@ export async function runEval(options: RunEvalOptions): Promise<RunEvalResult> {
   // ---- 成本前置检查 ----
   const estimate = estimateRunCost(options.cases, options.subjectModel);
   if (options.maxCostUsd !== undefined && estimate.estimatedUsd > options.maxCostUsd) {
-    throw Object.assign(
-      new Error(
-        `预计本轮 judge 成本 $${estimate.estimatedUsd.toFixed(4)}（${estimate.judgeCalls} 次判定），` +
-          `超过上限 $${options.maxCostUsd.toFixed(4)}。请减少用例、关闭 judge 断言，或提高上限。`,
-      ),
-      { name: 'LLMError', code: 'EVAL_COST_EXCEEDED', retryable: false, statusCode: 422 },
+    /**
+     * ⚠️ 必须用真正的 `LLMError`，不能用 `Object.assign(new Error(...), {code})`。
+     *
+     * 路由层的 `handleError` / `classifyError` 用 `e instanceof LLMError` 判断，
+     * 普通 Error 即使挂了 code/statusCode 字段也会被当成未知错误 → 返回 500。
+     * 而「成本超限」是明确的 422 业务拒绝，报 500 会误导用户以为是服务端故障。
+     */
+    throw new LLMError(
+      `预计本轮 judge 成本 $${estimate.estimatedUsd.toFixed(4)}（${estimate.judgeCalls} 次判定），` +
+        `超过上限 $${options.maxCostUsd.toFixed(4)}。请减少用例、关闭 judge 断言，或提高上限。`,
+      'EVAL_COST_EXCEEDED',
+      false,
+      422,
     );
   }
 

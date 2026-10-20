@@ -2,6 +2,7 @@ import { env } from '@/lib/env';
 import { recordUsage } from '@/lib/llm/metering';
 import { LLMError } from '@/lib/llm/types';
 import { touchCredential } from '@/lib/llm/credentials';
+import { setActiveSpanAttributes, withSpan, withTaskSpan } from '@/lib/observability/tracing';
 import { mapWithConcurrency } from './chunk';
 import { planMapBudget } from '@/lib/llm/budget';
 import { prepareSummarizeTask } from './lifecycle';
@@ -100,22 +101,24 @@ async function runSinglePass(args: {
     meta: { phase: 'single', taskType: task.type, attempts: single.attempts, ...meta },
   });
 
-  await persistResult({
-    taskId,
-    output: single.text,
-    degraded: single.degraded,
-    usage: { ...single.usage, ...billing },
-    ttftMs: single.ttftMs,
-    latencyMs: Date.now() - startedAt,
-    extraMeta: {
-      chunks: 1,
-      taskType: task.type,
-      degradedReason: single.degradedReason,
-      attempts: single.attempts,
-      costCny: billing.costCny,
-      ...meta,
-    },
-  });
+  await withSpan('task.persist', { status: 'succeeded', degraded: single.degraded }, () =>
+    persistResult({
+      taskId,
+      output: single.text,
+      degraded: single.degraded,
+      usage: { ...single.usage, ...billing },
+      ttftMs: single.ttftMs,
+      latencyMs: Date.now() - startedAt,
+      extraMeta: {
+        chunks: 1,
+        taskType: task.type,
+        degradedReason: single.degradedReason,
+        attempts: single.attempts,
+        costCny: billing.costCny,
+        ...meta,
+      },
+    }),
+  );
 
   // 成功路径记录凭证使用情况（设置页要显示「最近使用 / 最近失败」）
   if (ctx.userProvider) {
@@ -138,6 +141,17 @@ async function runSinglePass(args: {
 export async function runSummarizePipeline(
   options: RunPipelineOptions,
 ): Promise<PipelineResult> {
+  return withTaskSpan(
+    'task.pipeline',
+    options.taskId,
+    { type: 'pipeline' },
+    () => runSummarizePipelineCore(options),
+  );
+}
+
+async function runSummarizePipelineCore(
+  options: RunPipelineOptions,
+): Promise<PipelineResult> {
   const { taskId, onDelta, signal } = options;
   const e = env();
   const startedAt = Date.now();
@@ -145,7 +159,16 @@ export async function runSummarizePipeline(
   // ---- 生命周期前置：加载 / 校验 / 置 running / 凭证 / 分块 ----
   // 这一阶段的失败是「任务根本没开始跑」，由 lifecycle 自己落 failed 后抛错，
   // 因此不进入下方的 try/catch（那里处理的是「已经开始跑」的失败）。
-  const { task, input, taskType, ctx, chunks } = await prepareSummarizeTask(taskId);
+  const { task, input, taskType, ctx, chunks, promptVersionId } =
+    await prepareSummarizeTask(taskId);
+
+  // 根 span 的溯源属性在拿到任务后才完整（type/model/promptVersionId）
+  setActiveSpanAttributes({
+    type: task.type,
+    model: ctx.defaultModel,
+    promptVersionId,
+    chunkCount: chunks.length,
+  });
 
   const budget = planMapBudget(chunks.length, 4000);
   const allAttempts: PipelineResult['attempts'] = [];
@@ -235,21 +258,23 @@ export async function runSummarizePipeline(
       meta: { phase: 'reduce', attempts: reduce.attempts },
     });
 
-    await persistResult({
-      taskId,
-      output: reduce.text,
-      degraded: anyDegraded,
-      usage: { ...reduce.usage, ...reduceBilling },
-      ttftMs: reduce.ttftMs,
-      latencyMs: Date.now() - startedAt,
-      extraMeta: {
-        chunks: chunks.length,
-        mapDegraded: budget.degraded,
-        degradedReason: reduce.degradedReason,
-        attempts: allAttempts,
-        costCny: reduceBilling.costCny,
-      },
-    });
+    await withSpan('task.persist', { status: 'succeeded', degraded: anyDegraded }, () =>
+      persistResult({
+        taskId,
+        output: reduce.text,
+        degraded: anyDegraded,
+        usage: { ...reduce.usage, ...reduceBilling },
+        ttftMs: reduce.ttftMs,
+        latencyMs: Date.now() - startedAt,
+        extraMeta: {
+          chunks: chunks.length,
+          mapDegraded: budget.degraded,
+          degradedReason: reduce.degradedReason,
+          attempts: allAttempts,
+          costCny: reduceBilling.costCny,
+        },
+      }),
+    );
 
     if (ctx.userProvider) {
       await touchCredential(ctx.userProvider.credentialId, {
@@ -289,7 +314,9 @@ export async function runSummarizePipeline(
       meta: { phase: 'pipeline', attempts: allAttempts },
     });
 
-    await failTask(taskId, err.code, err.message);
+    await withSpan('task.persist', { status: 'failed', errorCode: err.code }, () =>
+      failTask(taskId, err.code, err.message),
+    );
 
     // 让用户能自查「我的 key 最近失败过」——否则他只会看到任务失败，
     // 猜不到问题出在自己的凭证上（也可能是余额/权限/地址填错）

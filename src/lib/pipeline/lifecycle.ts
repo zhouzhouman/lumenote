@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { env } from '@/lib/env';
 import { LLMError } from '@/lib/llm/types';
+import { setSpanAttributes, withSpan } from '@/lib/observability/tracing';
 import { chunkText } from './chunk';
 import { normalizeTaskType, taskTypeDef, type TaskTypeDef } from '@/lib/tasks/types';
 import { validateVariables, type TemplateVariable } from './prompts/render';
@@ -43,6 +44,8 @@ export interface PreparedPipeline {
   ctx: PromptContext;
   /** 已按任务类型决定的分块结果；长度为 1 表示走单块短路 */
   chunks: { index: number; content: string }[];
+  /** 本次任务钉住的 Prompt 版本 id（trace 的溯源锚点之一） */
+  promptVersionId: string;
 }
 
 /**
@@ -50,8 +53,26 @@ export interface PreparedPipeline {
  *
  * 抛出的是 LLMError（带 code），路由层据此映射 HTTP 状态；
  * 与编排阶段的错误共用同一套错误分类。
+ *
+ * 可观测性：外层包一个 `task.lifecycle` span（父 span 是 pipeline 根 span），
+ * 把「加载/校验/分块」这阶段的耗时与规模单独记下来 ——
+ * 任务慢时能一眼分清是「准备阶段慢」还是「模型调用慢」。
  */
 export async function prepareSummarizeTask(taskId: string): Promise<PreparedPipeline> {
+  return withSpan('task.lifecycle', { taskId }, async (span) => {
+    const prepared = await prepareSummarizeTaskCore(taskId);
+    setSpanAttributes(span, {
+      type: prepared.task.type,
+      model: prepared.ctx.defaultModel,
+      promptVersionId: prepared.promptVersionId,
+      chunkCount: prepared.chunks.length,
+      inputLength: prepared.input.length,
+    });
+    return prepared;
+  });
+}
+
+async function prepareSummarizeTaskCore(taskId: string): Promise<PreparedPipeline> {
   const e = env();
 
   const task = await prisma.task.findUniqueOrThrow({
@@ -148,5 +169,6 @@ export async function prepareSummarizeTask(taskId: string): Promise<PreparedPipe
     taskType,
     ctx,
     chunks,
+    promptVersionId: task.promptVersionId,
   };
 }

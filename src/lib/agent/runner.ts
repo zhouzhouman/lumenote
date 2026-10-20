@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db';
 import { env } from '@/lib/env';
 import { LLMError } from '@/lib/llm/types';
 import { recordUsage } from '@/lib/llm/metering';
+import { setActiveSpanAttributes, withSpan, withTaskSpan } from '@/lib/observability/tracing';
 import { chunkText } from '@/lib/pipeline/chunk';
 import { resolveUserProvider } from '@/lib/pipeline/runner';
 import { buildFallbackChain } from '@/lib/llm/registry';
@@ -48,6 +49,16 @@ type AgentOutcome = {
 };
 
 export async function runAgentPipeline(options: RunAgentPipelineOptions): Promise<AgentRunResult> {
+  // 任务级 trace 根 span：从「加载任务」一直覆盖到「产物落库」，
+  // 因此 task.persist 与 Agent 循环里的所有 span 共享同一个 traceId。
+  return withTaskSpan('task.pipeline', options.taskId, { type: 'agent' }, () =>
+    runAgentPipelineCore(options),
+  );
+}
+
+async function runAgentPipelineCore(
+  options: RunAgentPipelineOptions,
+): Promise<AgentRunResult> {
   const { taskId, onStep, signal } = options;
   const e = env();
   const startedAt = Date.now();
@@ -97,6 +108,13 @@ export async function runAgentPipeline(options: RunAgentPipelineOptions): Promis
 
   const primary = chain[0]!;
   const model = userProvider?.model ?? e.DEFAULT_MODEL;
+
+  // 根 span 的溯源属性在任务/模型确定后才完整
+  setActiveSpanAttributes({
+    type: task.type,
+    model,
+    promptVersionId: task.promptVersionId,
+  });
 
   // ---- 文档分块与工具上下文 ----
   const chunks = chunkText(content, {
@@ -258,31 +276,33 @@ export async function runAgentPipeline(options: RunAgentPipelineOptions): Promis
   const outcome = decideOutcome(result);
   const displayText = extractDisplayText(result.text, result.structured);
 
-  await prisma.task.update({
-    where: { id: taskId },
-    data: {
-      status: outcome.status,
-      outputContent: displayText || result.text,
-      outputMeta: {
-        taskType: 'agent',
-        // 结构化结论单独存：前端要渲染成「结论卡片 + 证据引用」，
-        // 与 displayText（散文）职责不同
-        structured: result.structured,
-        stopReason: result.stopReason,
-        stepCount: result.steps.length,
-        usedTools: [...new Set(result.steps.flatMap((s) => s.toolCalls.map((c) => c.name)))],
-        finalChunkCount: result.finalChunks.length,
-        costCny: billing.costCny,
-        cacheHitRate: billing.cacheHitRate,
-        peak: billing.peak,
-      } as never,
-      degraded: outcome.degraded,
-      errorCode: outcome.errorCode ?? null,
-      errorMessage: outcome.errorMessage ?? null,
-      latencyMs: Date.now() - startedAt,
-      completedAt: new Date(),
-    },
-  });
+  await withSpan('task.persist', { status: outcome.status, degraded: outcome.degraded }, () =>
+    prisma.task.update({
+      where: { id: taskId },
+      data: {
+        status: outcome.status,
+        outputContent: displayText || result.text,
+        outputMeta: {
+          taskType: 'agent',
+          // 结构化结论单独存：前端要渲染成「结论卡片 + 证据引用」，
+          // 与 displayText（散文）职责不同
+          structured: result.structured,
+          stopReason: result.stopReason,
+          stepCount: result.steps.length,
+          usedTools: [...new Set(result.steps.flatMap((s) => s.toolCalls.map((c) => c.name)))],
+          finalChunkCount: result.finalChunks.length,
+          costCny: billing.costCny,
+          cacheHitRate: billing.cacheHitRate,
+          peak: billing.peak,
+        } as never,
+        degraded: outcome.degraded,
+        errorCode: outcome.errorCode ?? null,
+        errorMessage: outcome.errorMessage ?? null,
+        latencyMs: Date.now() - startedAt,
+        completedAt: new Date(),
+      },
+    }),
+  );
 
   if (userProvider) {
     await touchCredential(userProvider.credentialId, {
