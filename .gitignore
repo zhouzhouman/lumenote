@@ -21,6 +21,17 @@ coverage/
 # 没有理由让它们进入版本库。
 scripts/verify/.auth-seed.json
 .tmp-shots/
+# E2E 与浏览器测试的报告/快照产物
+playwright-report/
+test-results/
+
+# ---- 工作树与本地实验产物 ----
+# 多 worktree 并行开发时用来隔离工作区
+.worktrees/
+# 评估与基准测试的本地结果，含模型输出与成本数据，不入库
+.eval-results/
+# 任务级 trace 的落盘文件（OpenTelemetry 导出），可能含 prompt 内容
+*.trace.jsonl
 
 # ---- 数据库 ----
 # 本地 docker-compose 起的库数据

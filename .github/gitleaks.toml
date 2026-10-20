@@ -1,0 +1,31 @@
+# gitleaks 配置：在默认规则之上只做「降低误报」的增量配置。
+# CI 使用固定版本 8.30.1 的官方 CLI（见 .github/workflows/ci.yml 的 secret-scan job）。
+#
+# 局限（必须知道）：
+# 1. CI 扫描的是当前工作树（gitleaks dir），不是全量 git 历史，
+#    因此历史上曾经提交过、后来删除的凭据不会被发现；
+# 2. 本文件随仓库一起评审，改动本文件本身需要 code review 关注；
+# 3. 它只是「疑似凭据」的启发式检测，不等于安全审计。
+
+title = "Lumenote gitleaks config"
+
+[extend]
+# 复用 gitleaks 内置的默认规则集，只在其上追加 allowlist
+useDefault = true
+
+# 单测里的伪造 key 只用于验证凭据掩码/拦截逻辑，不是真实凭据。
+# 只在 tests/ 下的测试文件里放行，避免把生产代码也一并豁免。
+[[allowlists]]
+description = "测试夹具中的伪造 API key（用于单测掩码与守卫逻辑）"
+paths = [
+  '''tests/.*\.test\.tsx?$''',
+]
+
+# CI 与测试配置里必须存在的「合法假值」：它们被当作占位符写死在仓库里，
+# 不是真实凭据。按精确值豁免，而不是整文件豁免，避免降低这些文件的检测能力。
+[[allowlists]]
+description = "CI / vitest 配置中的占位 secret（非真实凭据）"
+regexes = [
+  '''ci-secret-at-least-32-characters-long-xxxx''',
+  '''test-secret-that-is-at-least-32-characters-long''',
+]
