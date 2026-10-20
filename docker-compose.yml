@@ -129,7 +129,10 @@ services:
       DEEPSEEK_BASE_URL: '${DEEPSEEK_BASE_URL:-https://api.deepseek.com}'
       DEEPSEEK_API_KEY: '${DEEPSEEK_API_KEY:-}'
       OPENAI_API_KEY: '${OPENAI_API_KEY:-}'
-      DEFAULT_MODEL: '${DEFAULT_MODEL:-deepseek-v4.1-flash}'
+      # 与 src/lib/llm/registry.ts / pricing.ts / .env.example 的模型 ID 保持一致。
+      # （曾误写成 deepseek-v4.1-flash，而代码只认识 deepseek-flash —— 会让计费与
+      #   降级链全部落到「未知模型」分支。）
+      DEFAULT_MODEL: '${DEFAULT_MODEL:-deepseek-flash}'
       FALLBACK_MODEL: '${FALLBACK_MODEL:-deepseek-v4-pro}'
       # 演示/预览环境可设为 true，强制使用本地 mock，避免真实付费调用
       MOCK_LLM: '${MOCK_LLM:-false}'
@@ -137,9 +140,23 @@ services:
       # memory（默认，单实例）| redis（多实例共享，需要下面的 REDIS_URL）
       RATE_LIMIT_DRIVER: '${RATE_LIMIT_DRIVER:-memory}'
       REDIS_URL: 'redis://redis:6379'
+      RATE_LIMIT_REDIS_PREFIX: '${RATE_LIMIT_REDIS_PREFIX:-lumenote:rl:}'
+      # open：Redis 故障时回退进程内存（可用性优先，退化为每实例限流）
+      # closed：Redis 故障时拒绝请求（安全优先，全站 429）
+      RATE_LIMIT_FAIL_MODE: '${RATE_LIMIT_FAIL_MODE:-open}'
+      # 可信代理层数。0 = 不信任任何 X-Forwarded-For / X-Real-IP（默认，最安全，
+      # 但所有请求共享一个 IP 限流桶）；部署在 N 层反向代理之后时按实际层数设置，
+      # 且应用端口**只能**对代理开放，否则直连者可伪造 XFF。
+      TRUST_PROXY_HOPS: '${TRUST_PROXY_HOPS:-0}'
       RATE_LIMIT_PER_MINUTE: '${RATE_LIMIT_PER_MINUTE:-10}'
       FREE_DAILY_QUOTA: '${FREE_DAILY_QUOTA:-20}'
       MAX_CONCURRENT_TASKS_PER_USER: '${MAX_CONCURRENT_TASKS_PER_USER:-1}'
+      # ---- 邮件（注册验证码）----
+      # console：不发信，验证码打到日志；生产环境代码硬性禁止把验证码回传客户端，
+      # 因此正式环境必须改用 resend（或 smtp，尚未接入）并把 RESEND_API_KEY 注入。
+      MAIL_TRANSPORT: '${MAIL_TRANSPORT:-console}'
+      MAIL_FROM: '${MAIL_FROM:-Lumenote <no-reply@lumenote.local>}'
+      RESEND_API_KEY: '${RESEND_API_KEY:-}'
       # ---- 应用 ----
       NEXT_PUBLIC_APP_URL: '${NEXT_PUBLIC_APP_URL:-http://localhost:3000}'
     healthcheck:

@@ -26,7 +26,7 @@ export async function POST() {
      *
      * 这句话之前只写在注释里，代码走的却是 handleError(e) —— 500 且 cookie 原样保留。
      * 而前端的登出逻辑是「无论成功失败都跳 /login」，于是：
-     *   跳 /login → middleware 看到 cookie 仍在 → 弹回 /workspace → 用户退不出去。
+     *   跳 /login → proxy 看到 cookie 仍在 → 弹回 /workspace → 用户退不出去。
      * 注释与实现不一致，正是最容易长期潜伏的一类缺陷。
      *
      * 残留的那一条 Session 记录会在过期后由 purgeExpiredSessions 清掉，

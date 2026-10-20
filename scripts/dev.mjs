@@ -365,13 +365,14 @@ async function startWithDocker(pgIsReadyTool, docker) {
     die('docker compose 已执行，但 PostgreSQL 仍未就绪', [
       '排查命令: docker compose ps',
       '          docker compose logs postgres',
-      '注意：容器内默认库名是 lumenote_dev，而应用默认连 lumenote；',
+      '注意：docker-compose.yml 的 POSTGRES_DB 与 .env 的 DATABASE_URL 库名必须一致（当前均为 lumenote）；',
       '      若首次使用，请执行 pnpm prisma:deploy && pnpm prisma:seed。',
     ]);
   }
 
   log(`✓ PostgreSQL 就绪（docker）: ${maskedConnectionUrl()}`);
-  warn('提示：docker-compose.yml 内 default 数据库名为 lumenote_dev，若连接报库不存在请检查 PGDATABASE。');
+  log('  提示：容器库名由 docker-compose.yml 的 POSTGRES_DB 决定（当前 lumenote），');
+  log('        与 .env.example 的 DATABASE_URL 保持一致；首次使用需跑 pnpm prisma:deploy。');
 }
 
 // ------------------------------------------------------------

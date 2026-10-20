@@ -159,7 +159,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
        * 不用 router.refresh() 之外的额外操作。
        *
        * (app) 布局是服务端组件，靠 cookie 鉴权。登录后必须让服务端
-       * 重新渲染一次才能拿到新 cookie，否则 middleware 仍会把用户
+       * 重新渲染一次才能拿到新 cookie，否则 proxy 仍会把用户
        * 当成未登录弹回登录页。refresh() 会让当前路由的服务端组件重跑。
        */
       router.refresh();
