@@ -1,5 +1,7 @@
 import type { LLMMessage, ToolCall } from '@/lib/llm/types';
 import type { TextChunk } from '@/lib/pipeline/chunk';
+import { digestText } from '@/lib/observability/sanitize';
+import { setSpanAttributes, withSpan } from '@/lib/observability/tracing';
 import {
   appendChunks,
   executeTool,
@@ -134,7 +136,32 @@ export async function dispatchToolCalls(args: DispatchToolCallsArgs): Promise<To
     // 先记账再执行：失败的工具调用同样消耗额度（模型不能靠失败来无限重试）
     state.perTool.set(name, used + 1);
 
-    const exec = await executeTool(name, call.arguments, context, chunks);
+    /**
+     * 一次工具执行 = 一个 `agent.tool` span。
+     *
+     * 参数**只记录哈希与长度**，不记录原文 —— 工具参数里可能含用户问题、
+     * 待对比的任务 id 等，虽然通常不算敏感，但没有必要为了排障把用户内容落盘。
+     */
+    const argsDigest = digestText(canonicalizeArgs(call.arguments));
+    const toolStartedAt = Date.now();
+    const exec = await withSpan(
+      'agent.tool',
+      {
+        toolName: name,
+        toolArgsHash: argsDigest.hash,
+        toolArgsLength: argsDigest.length,
+        quotaRemaining: quota - (used + 1),
+      },
+      async (span) => {
+        const execution = await executeTool(name, call.arguments, context, chunks);
+        setSpanAttributes(span, {
+          ok: execution.result.ok,
+          durationMs: Date.now() - toolStartedAt,
+          displayLength: execution.display.length,
+        });
+        return execution;
+      },
+    );
 
     // 抓取到的正文并入文档（重编号以避免 chunk index 冲突）
     if (exec.newChunks && exec.newChunks.length > 0) {

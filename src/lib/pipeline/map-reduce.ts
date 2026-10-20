@@ -1,5 +1,6 @@
 import { streamWithFallback } from '@/lib/llm/service';
 import { wrapUntrusted } from '@/lib/llm/guardrail';
+import { setSpanAttributes, withSpan } from '@/lib/observability/tracing';
 import { renderTemplate } from './prompts/render';
 import type { PromptContext } from './context';
 import type { PipelineResult } from './types';
@@ -79,8 +80,42 @@ export function toResult(
  * Map 阶段：单个分块的摘要（不流式给用户）。
  *
  * 每个分块单独注入 points 指令，其余保持 system 完全一致以利缓存命中。
+ *
+ * 可观测性：每次调用包一个 `llm.request` span（phase=map），
+ * 记录 provider / token / 耗时 / 尝试次数；**不记录 prompt 正文**。
  */
 export async function runMapChunk(args: {
+  taskId: string;
+  ctx: PromptContext;
+  chunk: { index: number; content: string };
+  budget: { perChunkPoints: number };
+  signal?: AbortSignal;
+}): Promise<SingleRunResult> {
+  const startedAt = Date.now();
+  return withSpan(
+    'llm.request',
+    { phase: 'map', model: args.ctx.defaultModel, chunkIndex: args.chunk.index },
+    async (span) => {
+      try {
+        const result = await runMapChunkCore(args);
+        setSpanAttributes(span, {
+          provider: result.usage.provider,
+          inputTokens: result.usage.usage.inputTokens,
+          outputTokens: result.usage.usage.outputTokens,
+          durationMs: Date.now() - startedAt,
+          attempt: Math.max(1, result.attempts.length),
+          degraded: result.degraded,
+        });
+        return result;
+      } catch (error) {
+        setSpanAttributes(span, { durationMs: Date.now() - startedAt, ok: false });
+        throw error;
+      }
+    },
+  );
+}
+
+async function runMapChunkCore(args: {
   taskId: string;
   ctx: PromptContext;
   chunk: { index: number; content: string };
@@ -132,8 +167,53 @@ export async function runMapChunk(args: {
   };
 }
 
-/** Reduce 阶段：合并为最终结果（流式推给用户） */
+/**
+ * Reduce 阶段：合并为最终结果（流式推给用户）。
+ *
+ * 可观测性：包一个 `llm.request` span（phase=reduce）；
+ * 单块短路路径也走这里（isReduce 缺省），因此统一由 `phase=reduce/finish=single` 区分。
+ */
 export async function runReduce(args: {
+  taskId: string;
+  ctx: PromptContext;
+  input: string;
+  onDelta?: (delta: string) => void;
+  signal?: AbortSignal;
+  pointCount: number;
+  isReduce?: boolean;
+  /** 覆盖采样参数；不传则用 ctx 里按任务类型解析出的值 */
+  maxOutputTokens?: number;
+  temperature?: number;
+}): Promise<SingleRunResult> {
+  const startedAt = Date.now();
+  return withSpan(
+    'llm.request',
+    {
+      phase: 'reduce',
+      model: args.ctx.defaultModel,
+      finish: args.isReduce ? 'reduce' : 'single',
+    },
+    async (span) => {
+      try {
+        const result = await runReduceCore(args);
+        setSpanAttributes(span, {
+          provider: result.usage.provider,
+          inputTokens: result.usage.usage.inputTokens,
+          outputTokens: result.usage.usage.outputTokens,
+          durationMs: Date.now() - startedAt,
+          attempt: Math.max(1, result.attempts.length),
+          degraded: result.degraded,
+        });
+        return result;
+      } catch (error) {
+        setSpanAttributes(span, { durationMs: Date.now() - startedAt, ok: false });
+        throw error;
+      }
+    },
+  );
+}
+
+async function runReduceCore(args: {
   taskId: string;
   ctx: PromptContext;
   input: string;
