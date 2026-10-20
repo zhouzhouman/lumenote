@@ -341,10 +341,16 @@ async function startWithDocker(pgIsReadyTool, docker) {
   }
 
   log('未设置 PGHOME，检测到 docker —— 回退到 docker compose 启动 postgres 服务');
+  /**
+   * shell 仅在 Windows 打开：Docker Desktop 装的是 docker.exe，本不需要 shell，
+   * 但允许 PATH 上出现 .cmd/.bat 的 docker 垫片（企业环境常见），
+   * Node 无法直接 spawn .cmd，需要 shell 解析。参数都是固定字面量，无注入面。
+   */
   const r = spawnSync(docker, ['compose', 'up', '-d', 'postgres'], {
     cwd: ROOT,
     stdio: 'inherit',
     env: process.env,
+    shell: IS_WIN,
   });
 
   if (r.status !== 0) {
