@@ -27,7 +27,8 @@ import {
   type RunInput,
   type CaseResultInput,
 } from '@/lib/eval/report';
-import { estimateRunCost } from '@/lib/eval/runner';
+import { estimateRunCost, runEval } from '@/lib/eval/runner';
+import { classifyError, LLMError } from '@/lib/llm/types';
 
 /**
  * 评测框架核心的单测。
@@ -537,6 +538,48 @@ describe('estimateRunCost：必须按真实材料估算成本', () => {
       'deepseek-flash',
     );
     expect(r.judgeCalls).toBe(3);
+  });
+});
+
+describe('runEval：成本超限错误必须可被错误分类器识别', () => {
+  /**
+   * 锁一个真实 bug：成本超限原本用 `Object.assign(new Error(...), {code,statusCode})`
+   * 构造，但路由层的 `handleError` / `classifyError` 用 `e instanceof LLMError` 判断。
+   * 普通 Error 会落到「未知错误」分支 → 返回 500，把一个明确的 422 业务拒绝
+   * 误报成服务端故障，用户按 500 去排查只会找错方向。
+   *
+   * 成本检查在**任何 DB 查询之前**执行，所以这里可以传一个空壳 prisma 来测分类。
+   */
+  it('抛出 LLMError(EVAL_COST_EXCEEDED, 422)，且 classifyError 原样返回', async () => {
+    const error = await runEval({
+      prisma: null as never,
+      userId: 'u',
+      datasetId: 'd',
+      promptVersionId: 'p',
+      templateId: 't',
+      subjectModel: 'deepseek-flash',
+      cases: [
+        {
+          caseId: 'c1',
+          caseName: 'c1',
+          weight: 1,
+          isRegression: false,
+          expectations: [{ kind: 'judge', value: { dimension: 'faithfulness', rubric: 'x' } }],
+          material: '材料内容'.repeat(20),
+          output: '一段输出',
+        },
+      ],
+      maxCostUsd: 0,
+      enableJudge: true,
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(LLMError);
+    const llmError = error as LLMError;
+    expect(llmError.code).toBe('EVAL_COST_EXCEEDED');
+    expect(llmError.statusCode).toBe(422);
+    expect(llmError.retryable).toBe(false);
+    // classifyError 对已是 LLMError 的实例原样返回（路由据此映射 422 而不是 500）
+    expect(classifyError(llmError)).toBe(llmError);
   });
 });
 
