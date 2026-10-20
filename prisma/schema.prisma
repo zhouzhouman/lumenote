@@ -439,7 +439,8 @@ model UsageLog {
   completionTokens Int     @default(0)
   // 缓存命中的输入 token 数。DeepSeek 区分 cache hit/miss 计价，此字段是降本的核心证据
   cachedTokens     Int     @default(0)
-  // 按计价时段与缓存分档换算后的成本（人民币元）
+  // 按计价时段与缓存分档换算后的成本（**美元**，与 pricing.ts 的价目表一致）。
+  // 人民币换算只发生在展示边界（src/lib/llm/metering.ts 的 usdToCny），不要把本列当人民币用。
   estimatedCost    Float   @default(0)
   // 计价时段：offpeak 为 Peak 的半价，影响成本准确性
   peakPricing      Boolean @default(false)
