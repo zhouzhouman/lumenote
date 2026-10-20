@@ -82,8 +82,18 @@ jobs:
           NEXT_TELEMETRY_DISABLED: '1'
 
   # ---------------------------------------------------------------------------
-  # 集成测试：真正连 Postgres。test:integration 脚本与配置由后续 Agent 补齐；
-  # 在脚本落地前这个 job 会失败，这是预期行为（不是本 workflow 的语法问题）。
+  # 集成测试：真正连 Postgres + 真实 HTTP。
+  #
+  # 环境准备全部由 vitest.integration.config.ts 的 globalSetup 负责：
+  #   1) DROP SCHEMA public CASCADE; CREATE SCHEMA public;
+  #   2) prisma migrate deploy
+  #   3) tsx prisma/seed.ts
+  #   4) 启动被测应用（next dev，**不需要先 build**）
+  #   5) 轮询 /api/health 就绪
+  #
+  # 因此这里只需要：Postgres service 可达 + Prisma client 已生成。
+  # 不要再加 `prisma deploy` / `prisma seed` 步骤 —— 与 harness 的「重置库」
+  # 顺序冲突，且会白跑一遍迁移/种子，掩盖 harness 自己的失败。
   # ---------------------------------------------------------------------------
   integration:
     runs-on: ubuntu-latest
@@ -131,21 +141,78 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
+      # harness 会自行 migrate + seed；但 next dev 启动的应用 import @prisma/client，
+      # 测试进程内的 globalSetup 也直接 import @prisma/client，所以 client 必须先生成。
       - name: Prisma client 生成
         run: pnpm prisma:generate
 
-      - name: 应用数据库迁移
-        run: pnpm prisma:deploy
-
-      - name: 写入种子数据
-        run: pnpm prisma:seed
-
-      - name: 集成测试
+      - name: 集成测试（harness 自管 schema / migrate / seed / next dev）
         run: pnpm test:integration
 
   # ---------------------------------------------------------------------------
-  # 覆盖率：上传 coverage/ 供人工与后续阈值门禁使用。
-  # 阈值由测试配置（vitest.config.ts）实现，这里只负责产出与归档。
+  # Redis 限流真实验证：本机/大多数开发环境没有 Redis，
+  # 唯一能证明 Lua 脚本、并发原子计数、TTL/窗口恢复在真 Redis 上成立的地方就是 CI。
+  #
+  # 脚本语义（scripts/verify/rate-limit-redis.mjs）：
+  #   0 = 全部检查通过（真实 Redis 已验证）
+  #   1 = 验证失败
+  #   2 = Redis 不可用，SKIPPED（脚本「绝不伪装成功」）
+  # 本 job 的 Redis 来自 service，正常应退出 0；若退出 2 说明 service 没起来，
+  # job 同样变红 —— 不把「跳过」当「通过」。
+  #
+  # ⚠️ 本地无 Docker/Redis：本 job 未在本地实际运行，仅做静态校验（actionlint）。
+  # ---------------------------------------------------------------------------
+  rate-limit-redis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        # 等 Redis 真正可响应，而不是容器启动即开跑
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      REDIS_URL: redis://localhost:6379
+      RATE_LIMIT_REDIS_PREFIX: 'lumenote:rl:'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取 package.json 中的 pnpm 版本
+        id: pnpm-version
+        run: echo "version=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.pnpm-version.outputs.version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: Prisma client 生成
+        run: pnpm prisma:generate
+
+      - name: 真实 Redis 限流验证
+        run: pnpm test:redis
+
+  # ---------------------------------------------------------------------------
+  # 覆盖率：上传 coverage/ 供人工与阈值门禁使用。
+  # 阈值由 vitest.config.ts 的 coverage.thresholds 实现：未达标时 vitest 以
+  # 非 0 退出 → 本 job 失败；报告仍会通过 if: always() 上传便于定位。
+  # 覆盖率只统计单测（集成测试被 vitest.config.ts 显式排除）。
   # ---------------------------------------------------------------------------
   coverage:
     runs-on: ubuntu-latest
