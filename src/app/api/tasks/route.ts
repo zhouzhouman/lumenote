@@ -7,6 +7,7 @@ import { requireUserId } from '@/lib/auth/authz';
 import { runSummarizePipeline } from '@/lib/pipeline/runner';
 import { extractText } from '@/lib/pipeline/extract/text';
 import { estimateTokens } from '@/lib/llm/mock';
+import { LLMError } from '@/lib/llm/types';
 import { env } from '@/lib/env';
 import {
   idempotentTask,
@@ -190,12 +191,7 @@ async function createTask(  userId: string,
     e.MAX_CONCURRENT_TASKS_PER_USER,
   );
   if (!concurrency.ok) {
-    throw Object.assign(new Error('你有任务正在处理中，请等待完成后再提交'), {
-      name: 'LLMError',
-      code: 'TOO_MANY_RUNNING',
-      retryable: true,
-      statusCode: 429,
-    });
+    throw new LLMError('你有任务正在处理中，请等待完成后再提交', 'TOO_MANY_RUNNING', true, 429);
   }
 
   // 成本保护 2：每日配额。仅在使用站点凭证时检查（见上面说明）。
@@ -215,17 +211,12 @@ async function createTask(  userId: string,
 
     const quota = await checkDailyQuota(userId, quotaLimit);
     if (!quota.ok) {
-      throw Object.assign(
-        new Error(
-          `今日免费额度已用完（${quota.used}/${quotaLimit}）。` +
-            '你可以到「模型设置」填入自己的 API Key，用你自己的额度继续生成。',
-        ),
-        {
-          name: 'LLMError',
-          code: 'QUOTA_EXCEEDED',
-          retryable: false,
-          statusCode: 429,
-        },
+      throw new LLMError(
+        `今日免费额度已用完（${quota.used}/${quotaLimit}）。` +
+          '你可以到「模型设置」填入自己的 API Key，用你自己的额度继续生成。',
+        'QUOTA_EXCEEDED',
+        false,
+        429,
       );
     }
   }
@@ -250,16 +241,11 @@ async function createTask(  userId: string,
   });
 
   if (!template || template.versions.length === 0) {
-    throw Object.assign(
-      new Error(
-        `Prompt 模板「${taskTypeDefResolved.templateName}」未初始化，请先执行 pnpm prisma:seed`,
-      ),
-      {
-        name: 'LLMError',
-        code: 'TEMPLATE_MISSING',
-        retryable: false,
-        statusCode: 500,
-      },
+    throw new LLMError(
+      `Prompt 模板「${taskTypeDefResolved.templateName}」未初始化，请先执行 pnpm prisma:seed`,
+      'TEMPLATE_MISSING',
+      false,
+      500,
     );
   }
 
