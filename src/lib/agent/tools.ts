@@ -360,6 +360,20 @@ export const AGENT_TOOLS: LLMTool[] = [
   },
 ];
 
+/**
+ * 供上层展示：用到的工具名 → 中文标签。
+ *
+ * 放在工具注册表旁边（而不是循环里），是因为它必须与 `TOOL_NAMES`
+ * 同步维护 —— 新增工具时忘改标签，会直接表现为时间线上出现英文工具名。
+ */
+export const TOOL_LABELS: Record<string, string> = {
+  [TOOL_NAMES.listSections]: '列出结构',
+  [TOOL_NAMES.searchChunks]: '检索文档',
+  [TOOL_NAMES.fetchUrl]: '抓取网页',
+  [TOOL_NAMES.getGlossary]: '查询术语',
+  [TOOL_NAMES.diffWithTask]: '版本对比',
+};
+
 // ============================================================
 // 工具执行器（带 IO 的部分）
 // ============================================================
