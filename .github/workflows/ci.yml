@@ -6,18 +6,39 @@ on:
   pull_request:
     branches: [main]
 
-# 同一分支的新 push 会取消上一个未完成的运行，避免排队浪费额度
+# 同一分支的新 push / 新提交会取消上一个未完成的运行，避免排队浪费额度
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# 默认只读：CI 不需要写仓库权限。
+# 镜像发布需要 packages: write，放在独立的 docker-publish.yml 里单独提权。
+permissions:
+  contents: read
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # 基础质量门禁：不依赖数据库、不依赖外部网络服务
+  # ---------------------------------------------------------------------------
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
+
+      # pnpm 版本只以 package.json 的 packageManager 字段为唯一事实来源，
+      # 不在 workflow 里手写版本号，也不依赖 runner 预装的 pnpm。
+      # 必须在 actions/setup-node 之前完成：setup-node 的 cache: pnpm
+      # 需要先执行 `pnpm store path`，pnpm 不在 PATH 上会直接失败。
+      - name: 读取 package.json 中的 pnpm 版本
+        id: pnpm-version
+        run: echo "version=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.pnpm-version.outputs.version }}
 
       # 缓存 pnpm store 而不是 node_modules：
       # node_modules 里有平台相关的二进制，跨平台缓存不可靠；
@@ -25,9 +46,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
+          cache: 'pnpm'
 
-      - name: 安装 pnpm
+      - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
       # 数据库不需要真实实例：单测是纯逻辑，不连库。
@@ -54,46 +75,166 @@ jobs:
       - name: 单元测试
         run: pnpm test
 
+      # standalone 产物由 Docker 镜像构建负责，这里只验证普通生产构建可成功。
       - name: 构建
         run: pnpm build
         env:
-          # 构建期也需要这些值：Next.js 会在构建时求值部分模块
           NEXT_TELEMETRY_DISABLED: '1'
 
-  docker:
+  # ---------------------------------------------------------------------------
+  # 集成测试：真正连 Postgres。test:integration 脚本与配置由后续 Agent 补齐；
+  # 在脚本落地前这个 job 会失败，这是预期行为（不是本 workflow 的语法问题）。
+  # ---------------------------------------------------------------------------
+  integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # 只在主干构建镜像：PR 里构建没有意义且拖慢检查
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lumenote
+          POSTGRES_PASSWORD: lumenote
+          POSTGRES_DB: lumenote_test
+        ports:
+          - 5432:5432
+        # 等数据库真正可接受连接，而不是容器启动即开跑
+        options: >-
+          --health-cmd "pg_isready -U lumenote -d lumenote_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      AUTH_SECRET: ci-secret-at-least-32-characters-long-xxxx
+      DATABASE_URL: postgresql://lumenote:lumenote@localhost:5432/lumenote_test?schema=public
+      MOCK_LLM: 'true'
+      DEFAULT_MODEL: deepseek-flash
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - name: 读取 package.json 中的 pnpm 版本
+        id: pnpm-version
+        run: echo "version=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
 
-      - name: 登录镜像仓库
-        uses: docker/login-action@v3
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
         with:
-          # 仓库地址/凭据来自 Secrets，本地开发不会触发这条路径
-          registry: ${{ secrets.REGISTRY }}
-          username: ${{ secrets.REGISTRY_USER }}
-          password: ${{ secrets.REGISTRY_TOKEN }}
+          version: ${{ steps.pnpm-version.outputs.version }}
 
-      - name: 生成镜像标签
-        id: meta
-        uses: docker/metadata-action@v5
+      - uses: actions/setup-node@v4
         with:
-          images: ${{ secrets.REGISTRY }}/lumenote
-          tags: |
-            type=sha,format=long
-            type=raw,value=latest
+          node-version: 22
+          cache: 'pnpm'
 
-      - name: 构建并推送
-        uses: docker/build-push-action@v6
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: Prisma client 生成
+        run: pnpm prisma:generate
+
+      - name: 应用数据库迁移
+        run: pnpm prisma:deploy
+
+      - name: 写入种子数据
+        run: pnpm prisma:seed
+
+      - name: 集成测试
+        run: pnpm test:integration
+
+  # ---------------------------------------------------------------------------
+  # 覆盖率：上传 coverage/ 供人工与后续阈值门禁使用。
+  # 阈值由测试配置（vitest.config.ts）实现，这里只负责产出与归档。
+  # ---------------------------------------------------------------------------
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取 package.json 中的 pnpm 版本
+        id: pnpm-version
+        run: echo "version=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
         with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          version: ${{ steps.pnpm-version.outputs.version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      # 测试会 import @prisma/client，未生成时类型/运行时都会失败
+      - name: Prisma client 生成
+        run: pnpm prisma:generate
+
+      - name: 覆盖率测试
+        run: pnpm test:coverage
+        env:
+          AUTH_SECRET: ci-secret-at-least-32-characters-long-xxxx
+          DATABASE_URL: postgresql://u:p@localhost:5432/test
+          MOCK_LLM: 'true'
+          DEFAULT_MODEL: deepseek-flash
+
+      # 即使覆盖率测试失败也要留下报告，便于定位
+      - name: 上传覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # PR 侧供应链检查：只读权限、不需要任何预配置 secret。
+  # 只在 pull_request 事件运行（push 到 main 时没有 base/head diff 可比）。
+  # ---------------------------------------------------------------------------
+  dependency-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 依赖变更审查（漏洞 / license / 新增依赖）
+        uses: actions/dependency-review-action@v4
+        with:
+          # 高危及以上直接阻断；低危只提示不阻断
+          fail-on-severity: high
+
+  # ---------------------------------------------------------------------------
+  # secret 扫描：直接用官方 gitleaks CLI，而不是 gitleaks-action。
+  # 原因：gitleaks-action 在 organization 仓库需要 GITLEAKS_LICENSE，
+  # 未配置时会让 CI 变红；CLI 对公开/个人/组织仓库行为一致，
+  # 且不需要任何预先配置的 secret。扫描当前工作树（含未跟踪的工作区），
+  # 不扫全量 git 历史 —— 见 CONTRIBUTING.md 的说明与局限。
+  # ---------------------------------------------------------------------------
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载固定版本的 gitleaks
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: 扫描工作树中的疑似凭据
+        run: gitleaks dir . --config .github/gitleaks.toml --redact --verbose --exit-code 1

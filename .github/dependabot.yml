@@ -24,11 +24,22 @@ updates:
         patterns:
           - 'prisma'
           - '@prisma/*'
+      # 可观测性依赖升级风险低、版本联动强（api 与 sdk-* 需成对升级），单独成组
+      observability:
+        patterns:
+          - '@opentelemetry/*'
+          - 'ioredis'
+      # 测试工具链：vitest 与 coverage 插件必须版本对齐，否则 peer 依赖会冲突
+      test-tooling:
+        patterns:
+          - 'vitest'
+          - '@vitest/*'
 
   # GitHub Actions 本身也要跟进，供应链风险不可忽视
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    open-pull-requests-limit: 5
     commit-message:
       prefix: 'chore(ci)'

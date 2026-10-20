@@ -1,0 +1,82 @@
+name: Docker Publish
+
+# 镜像发布与 CI 完全解耦：
+# - 只在 main 分支 push（即 PR 合并后）或手动触发；
+# - 绝不在 pull_request 上触发，因此缺少 Registry Secrets 不会拖红 PR 检查；
+# - 即使这里失败，CI 的 verify 等 job 也不受影响（workflow 之间互不阻塞）。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一 ref 上不取消正在进行的发布：镜像推送中途被杀可能留下半完成的 manifest。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# 最小权限：读仓库 + 推到镜像仓库（GHCR 场景需要 packages: write）
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: 构建并发布镜像
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Secrets 缺失时在步骤里用 env 判断并优雅跳过；
+    # 注意不能在 if: 条件里直接引用 secrets 上下文。
+    env:
+      REGISTRY: ${{ secrets.REGISTRY }}
+      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查镜像仓库凭据是否已配置
+        id: creds
+        if: env.REGISTRY != '' && env.REGISTRY_USER != '' && env.REGISTRY_TOKEN != ''
+        run: echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: 未配置镜像仓库 Secrets，跳过发布
+        if: env.REGISTRY == '' || env.REGISTRY_USER == '' || env.REGISTRY_TOKEN == ''
+        run: |
+          echo "::notice title=跳过镜像发布::未配置 REGISTRY / REGISTRY_USER / REGISTRY_TOKEN，本次只跳过多架构镜像推送，不影响 CI 与 PR 检查。"
+
+      - name: 配置 Buildx
+        if: steps.creds.outputs.ready == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录镜像仓库
+        if: steps.creds.outputs.ready == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      - name: 生成镜像标签
+        id: meta
+        if: steps.creds.outputs.ready == 'true'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.REGISTRY }}/lumenote
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest
+
+      - name: 构建并推送
+        if: steps.creds.outputs.ready == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NEXT_TELEMETRY_DISABLED=1
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
