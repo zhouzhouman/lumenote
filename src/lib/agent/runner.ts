@@ -6,8 +6,9 @@ import { chunkText } from '@/lib/pipeline/chunk';
 import { resolveUserProvider } from '@/lib/pipeline/runner';
 import { buildFallbackChain } from '@/lib/llm/registry';
 import { loadGlossary } from '@/lib/tasks/glossary';
-import { runAgent, type AgentStepRecord, type AgentRunResult } from '@/lib/agent/loop';
-import { extractDisplayText } from '@/lib/agent/loop';
+import { runAgent } from '@/lib/agent/orchestrator';
+import { extractDisplayText } from '@/lib/agent/output';
+import type { AgentStepRecord, AgentRunResult } from '@/lib/agent/types';
 import { touchCredential } from '@/lib/llm/credentials';
 
 /**
