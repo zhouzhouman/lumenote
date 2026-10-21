@@ -101,7 +101,13 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16-alpine
+        # ⚠️ 不能用官方 postgres:16-alpine：init 迁移第一行是
+        # `CREATE EXTENSION IF NOT EXISTS vector`（KnowledgeChunk.embedding 是 vector 类型），
+        # 而官方镜像**不含 pgvector**，迁移会以
+        #   SqlState(E0A000) extension "vector" is not available
+        # 失败 —— 表现为「集成测试 2 秒就挂」，很容易被误判成测试代码的问题。
+        # pgvector/pgvector:pg16 就是官方 PG16 + 预编译好的 vector 扩展，其余行为一致。
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: lumenote
           POSTGRES_PASSWORD: lumenote

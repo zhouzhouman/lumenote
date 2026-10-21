@@ -43,3 +43,12 @@ regexes = [
   '''sk-verify-secret-gamma-5555555555qwerty''',
   '''sk-e2e-credential-secret-abcdef1234567890''',
 ]
+
+# 集成测试注册用户用的固定密码：它必须满足 validatePasswordStrength（含大小写、
+# 数字、符号），所以看起来就像个真密码；但它是**测试夹具**，只存在于测试库。
+# 注意：这条规则只豁免 tests/ 下的固定值，生产代码里写死密码依然会被抓。
+[[allowlists]]
+description = "集成测试注册用户的固定密码（仅测试库）"
+regexes = [
+  '''Integration-Test-Pass-2026''',
+]

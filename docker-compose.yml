@@ -29,10 +29,17 @@
 
 services:
   # ---------- PostgreSQL ----------
-  # 固定 16-alpine 而不是 latest：latest 会在某次拉取时突然升级小版本，
-  # 导致本地能跑、CI 挂掉的经典问题。
+  # ⚠️ 必须是带 pgvector 的镜像，不能用官方 postgres:16-alpine。
+  # 原因：init 迁移的第一行是 `CREATE EXTENSION IF NOT EXISTS vector`
+  # （KnowledgeChunk.embedding 是 vector 类型），官方镜像没有这个扩展，
+  # `docker compose run --rm migrate` 会直接失败：
+  #   SqlState(E0A000) extension "vector" is not available
+  # pgvector/pgvector:pg16 = 官方 PG16 + 预编译扩展，其余行为一致。
+  #
+  # 同时固定 pg16 而不是 latest：latest 会在某次拉取时突然升级大版本，
+  # 导致本地能跑、线上挂掉的经典问题。
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: lumenote-postgres
     restart: unless-stopped
     environment:

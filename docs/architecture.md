@@ -654,7 +654,7 @@ flowchart TB
         BASE --> MIGRATOR
         BUILDER --> RUNNER
     end
-    MIGRATOR -->|"docker compose run --rm migrate"| PG[("postgres:16-alpine")]
+    MIGRATOR -->|"docker compose run --rm migrate"| PG[("pgvector/pgvector:pg16")]
     RUNNER -->|"docker compose --profile app up -d app"| PG
     RUNNER --> REDIS[("redis:7-alpine（可选）")]
 ```
