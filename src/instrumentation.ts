@@ -15,7 +15,10 @@
  *
  *   OBSERVABILITY_ENABLED=true|false  缺省 development 开、production 关
  *   TRACE_EXPORT=jsonl|console|otlp|none  默认 jsonl
- *   TRACE_DIR=.lumenote-data/traces    JSONL 落盘目录（已 gitignore）
+ *   TRACE_DIR=<系统临时目录>/lumenote-traces  JSONL 落盘目录。
+ *     **默认刻意在项目目录之外**：dev 下写在项目内会触发 Next 文件 watcher，
+ *     形成「刷新 → 写 trace → 热重载 → 再刷新」的死循环。只有确需持久化
+ *     （容器日志卷、评测报告）时才显式指到项目内或挂载卷。
  *   OTEL_EXPORTER_OTLP_ENDPOINT       TRACE_EXPORT=otlp 时必填，缺失降级 jsonl
  *
  * ## 为什么不做成「默认开启且全量」

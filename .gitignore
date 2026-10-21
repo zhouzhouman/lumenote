@@ -46,6 +46,12 @@ test-results/
 npm-debug.log*
 pnpm-debug.log*
 
+# ---- 工具临时锁 ----
+# 某些编辑器/代理在批量改写文件时会先落一个 .dsh-ops-update-<hash>.lock
+# 做互斥。这是纯瞬时文件，正常结束会自己删掉；进程被强杀时会残留。
+# 它出现在 src/ 或 docs/ 里，也不该被当成源码提交。
+.dsh-ops-update-*.lock
+
 # ---- 编辑器与系统 ----
 .vscode/
 .idea/

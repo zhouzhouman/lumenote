@@ -30,6 +30,18 @@ export default [
   ...next,
 
   {
+    /**
+     * 这条规则块**必须限定 files**。
+     *
+     * 不限定的话它会作用到所有文件，包括 scripts 目录下的 .mjs 脚本 —— 那些脚本
+     * 不经过 TypeScript 解析，`@typescript-eslint` 插件不会被加载，于是 ESLint
+     * 直接抛 "could not find plugin @typescript-eslint" 并整体退出。
+     * 以前只 lint ts/tsx 所以没暴露；一旦把 scripts 纳入检查就会踩到。
+     *
+     * 注：本注释里刻意不写 glob 字面量（星号加斜杠连写会提前终止块注释，
+     * 进而把后面整段配置解析成语法错误，报错位置离真正原因很远）。
+     */
+    files: ['**/*.ts', '**/*.tsx'],
     rules: {
       // 未使用变量降为警告但保留，且允许 _ 前缀显式忽略
       '@typescript-eslint/no-unused-vars': [

@@ -23,7 +23,7 @@
 | 摘要 Prompt 版本 | `cmv4td1fs0001uczmh0lmxk8z`（v1，模板 `cmv4td1fl0000uczmqm84e4uc`） |
 | Agent Prompt 版本 | `cmvay7i3o0004ogzmmbuvq8we`（v1，模板 `cmvay7i3e0003ogzmumna15fy`） |
 | 数据集 | 文档问答基线（eval:report mock）（id `cmvgremjd000090zmhkb3qmxu`，指纹 `4642-481bc636`） |
-| trace 目录 | `.lumenote-data/traces` |
+| trace 目录 | `.lumenote-data/traces`（仅报告脚本；应用默认写系统临时目录） |
 | 数据库规模（采集时） | Task 109 / UsageLog 152 / AgentStep 26 / EvalRun 11 |
 
 Prompt 模板版本与数据集均从**真实数据库**读取；数据集表没有 version 字段，因此用「用例内容指纹」作为可比较的版本标识。
@@ -187,6 +187,15 @@ Prompt 模板版本与数据集均从**真实数据库**读取；数据集表没
 
 tracing 由 `src/instrumentation.ts` 在应用启动时初始化；本报告脚本同样初始化 jsonl exporter，把 span 写到：
 `.lumenote-data/traces/<UTC 日期>.jsonl`（每行一个 span，已 gitignore）。
+
+> ⚠️ **这里与应用的默认值不同，是有意的**。
+> 应用的默认 `TRACE_DIR` 在**系统临时目录**（`<tmp>/lumenote-traces`），因为 dev server
+> 的 watcher 会监听项目目录：trace 一旦写进项目内，每写一行就触发一次热重载，
+> 而页面刷新又产生新 span，形成「刷新 → 写 trace → 热重载 → 再刷新」的死循环。
+> 本脚本是**一次性 CLI**，不跑 watcher，且报告需要可复现的落盘证据，
+> 所以它显式把 `TRACE_DIR` 指向项目内的 `.lumenote-data/traces`。
+> 如果你在 dev server 运行时手动执行本脚本，那批写入**仍可能**触发一次热重载 ——
+> 属预期行为，不是 bug；跑完 dev 请自行重启或忽略那一次编译。
 
 所有 span 都带 `taskId` 属性，同一任务的所有 span 共享同一 `traceId`；
 因此可以直接 `grep '"taskId":"<任务 id>"' .lumenote-data/traces/*.jsonl` 检索一次任务的完整链路。
