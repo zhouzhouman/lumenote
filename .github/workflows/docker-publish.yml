@@ -60,7 +60,7 @@ jobs:
       - name: 生成镜像标签
         id: meta
         if: steps.creds.outputs.ready == 'true'
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           # ⚠️ 镜像路径必须带**命名空间**，不能只拼 registry + 仓库名。
           # GHCR 的合法路径是 `ghcr.io/所有者/仓库名`，写成 `ghcr.io/lumenote`
