@@ -48,7 +48,7 @@ pnpm github:protect                                     # 真的写
 | --- | --- | --- |
 | 要求走 PR | `required_pull_request_reviews` | main 只能通过 PR 进入，保证 CI 在合并前跑过 |
 | 需要几个 approve | **0** | 单人仓库设 1 会锁死：GitHub 不允许自己批自己的 PR。等有协作者再 `--approvals 1` |
-| required checks | `CI / verify`、`CI / secret-scan`、`CI / dependency-review` | 快（≤1 分钟）且不依赖真实外部服务，适合当硬门禁 |
+| required checks | `verify`、`secret-scan`、`dependency-review` | 快（≤1 分钟）且不依赖真实外部服务，适合当硬门禁 |
 | 禁止 force push | `allow_force_pushes: false` | 防止改写 main 历史 |
 | 禁止删除分支 | `allow_deletions: false` | 同上 |
 | 话题必须 resolve | `required_conversation_resolution: true` | 避免「先合了再说」 |
@@ -57,13 +57,20 @@ pnpm github:protect                                     # 真的写
 
 ### 1.4 第二阶段：把慢 job 也加成门禁
 
-`CI / integration` 与 `CI / rate-limit-redis` 要起 Postgres/Redis service、跑真实 HTTP，
+`integration` 与 `rate-limit-redis` 要起 Postgres/Redis service、跑真实 HTTP，
 比前三个慢 3~5 倍。**先确认它们至少在 main 上成功跑过一次**，再写成 required：
 
 ```bash
 node scripts/github/harden-repo.mjs protect \
-  --checks "CI / verify,CI / secret-scan,CI / dependency-review,CI / integration,CI / rate-limit-redis"
+  --checks "verify,secret-scan,dependency-review,integration,rate-limit-redis"
 ```
+
+> ⚠️ **必须写裸 job 名，不能写 `CI / verify`。** 网页上分支保护的检查项列表显示成
+> 「工作流名 / job 名」（`CI / verify`），很容易照抄。但 GitHub 匹配的是 check-run
+> 的 `name`，Actions 上报的就是**job 名**本身。写成 `CI / verify` 的后果极其隐蔽：
+> 规则看起来配好了，UI 上也列着，但永远匹配不上 → 所有 PR 都是
+> `mergeable_state: blocked`；而管理员因为 `enforce_admins=false` 还能合，
+> 于是问题被掩盖，只有非管理员才会发现「我怎么永远合不进去」。
 
 为什么不在第一轮就全加：required check 一旦配错（job 名拼错、job 永远 skipped），
 main 会变成**谁都不能合**。先让它们自然跑绿，确认状态再上锁。
