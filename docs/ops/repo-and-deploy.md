@@ -162,10 +162,42 @@ curl -s localhost:3000/api/health                        # 6. 必须 200 且 db.
    而官方 `postgres:16-alpine` **不含 pgvector**。必须用
    `pgvector/pgvector:pg16`（官方 PG16 + 预编译扩展）。`docker-compose.yml`
    与 CI 的 integration job 都已固定成该镜像。
-2. **`AUTH_SECRET` 未设置**：compose 用 `${AUTH_SECRET:?...}` 写成 fail fast，
+2. **`DATABASE_URL 未配置，无法初始化 Prisma Client`（构建期）**
+   `next build` 在「收集页面数据」阶段会 import 路由模块，而 `src/lib/db.ts`
+   在**模块加载期**就 `new PrismaClient()`，缺 `DATABASE_URL` 直接抛错：
+
+   ```
+   Failed to collect configuration for /api/auth/refresh
+   Error: DATABASE_URL 未配置，无法初始化 Prisma Client
+   ```
+
+   builder 阶段因此显式设置了 `DATABASE_URL` / `AUTH_SECRET` 的**占位值**
+   （见 Dockerfile 注释）。它们不会进入 runner 镜像，运行时真实值由 compose 注入。
+   **不要删这两行**，删了镜像就构建不出来。
+3. **`AUTH_SECRET` 未设置**：compose 用 `${AUTH_SECRET:?...}` 写成 fail fast，
    缺了直接报错退出，而不是用默认密钥跑起来。
-3. **`.env.local` 不能直接喂给容器**：它里面 `NODE_ENV=development`，
+4. **`.env.local` 不能直接喂给容器**：它里面 `NODE_ENV=development`，
    且 `DATABASE_URL` 指向宿主机 localhost，在容器网络里不可达。
+5. **拉不到镜像 / `auth.docker.io` 报 Bad Gateway**：Docker Desktop 默认走系统代理，
+   而系统代理指向的端口（如 `127.0.0.1:7890`）没进程监听时，daemon 的所有出站请求
+   都会失败。要么打开代理软件，要么在 Settings → Resources → Proxies 里关掉系统代理，
+   并在 `~/.docker/daemon.json` 配国内镜像源（`registry-mirrors`）。
+
+### 2.1 本机实测记录（Docker Desktop + WSL2）
+
+| 步骤 | 结果 |
+| --- | --- |
+| `docker compose config`（含 `--profile app`） | exit 0，4 个 service 全部正确渲染 |
+| `docker compose --profile app build` | 两个镜像产出：`lumenote-app:local`、`lumenote-migrator:local`，约 2 分钟 |
+| `docker compose up -d postgres redis` | 两个容器 `healthy`；`pg_available_extensions` 里有 `vector 0.8.7` |
+| `docker compose run --rm migrate` | **exit 0**，6 个迁移全部应用 |
+| `docker compose --profile app up -d app` | `healthy` |
+| `curl /api/health` | **HTTP 200**，`{"status":"ok","db":{"ok":true,"latencyMs":8}}` |
+| `select count(*) from information_schema.tables` | 21 张表；`pg_extension` 里有 `vector 0.8.7` |
+
+`/api/health` 返回 200 就同时证明了「进程活着」和「数据库可用」——
+该接口只有在 `db.ok` 时才是 200。
+
 
 没有 Docker 时能做的静态校验（本次已通过 51/51）：
 
