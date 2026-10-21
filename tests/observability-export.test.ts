@@ -77,9 +77,12 @@ describe('配置解析（纯函数）', () => {
     expect(config.traceDir).toBe(path.resolve(TMP, 'custom-traces'));
   });
 
-  it('缺省目录是 .lumenote-data/traces', () => {
+  it('缺省目录在系统临时目录（刻意不放在项目内，避免 dev watcher 热重载循环）', () => {
     const config = resolveObservabilityConfig({ NODE_ENV: 'development' }, TMP);
-    expect(config.traceDir).toBe(path.resolve(TMP, DEFAULT_TRACE_DIR));
+    expect(path.isAbsolute(DEFAULT_TRACE_DIR)).toBe(true);
+    expect(config.traceDir).toBe(DEFAULT_TRACE_DIR);
+    // 关键回归：默认目录绝不能落在项目/工作目录内，否则每写一行 trace 都会触发 Next dev 热重载
+    expect(config.traceDir.startsWith(TMP)).toBe(false);
   });
 });
 
@@ -180,6 +183,34 @@ describe('JSONL exporter', () => {
     const record = spanToRecord(span);
     expect(record.traceId).toMatch(/^[0-9a-f]{32}$/);
     expect(record.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('acceptSpan 过滤：只导出本应用 scope 的 span（Next 内部 span 不落盘）', async () => {
+    const dir = path.join(TMP, 'filter-traces');
+    const memory = new InMemorySpanExporter();
+    const provider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(memory)] });
+    const frameworkTracer = provider.getTracer('next-internal');
+    const ownTracer = provider.getTracer('lumenote');
+
+    frameworkTracer.startActiveSpan('prepare route module', (span) => span.end());
+    ownTracer.startActiveSpan('task.pipeline', (span) => span.end());
+    const finished = memory.getFinishedSpans();
+    expect(finished).toHaveLength(2);
+
+    const exporter = new JsonlSpanExporter({
+      dir,
+      acceptSpan: (s) => s.instrumentationScope?.name === 'lumenote',
+    });
+    let code = -1;
+    exporter.export(finished, (result) => {
+      code = result.code;
+    });
+    await provider.shutdown();
+
+    expect(code).toBe(0);
+    const raw = readFileSync(path.join(dir, `${traceFileDate(new Date())}.jsonl`), 'utf8');
+    const { spans } = parseTraceJsonl(raw);
+    expect(spans.map((s) => s.name)).toEqual(['task.pipeline']);
   });
 
   it('目录不可写时只 warn 一次、返回失败码、不抛错', async () => {

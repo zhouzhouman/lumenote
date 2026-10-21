@@ -1,3 +1,4 @@
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 /**
@@ -17,7 +18,10 @@ import * as path from 'node:path';
  * - `OBSERVABILITY_ENABLED`：`true` / `false`。缺省时 development 开、其它关。
  *   （production 默认关：trace 是排障工具，生产是否落盘应由运维显式开启。）
  * - `TRACE_EXPORT`：`jsonl`（默认）| `console` | `otlp` | `none`。
- * - `TRACE_DIR`：JSONL 落盘目录，默认 `.lumenote-data/traces`（已 gitignore）。
+ * - `TRACE_DIR`：JSONL 落盘目录。默认在**系统临时目录**（`<tmp>/lumenote-traces`），
+ *   刻意不放在项目目录内：Next dev 的文件 watcher 会把项目内任何写入当成源码变化，
+ *   每写一行 trace 就触发一次页面热重载，形成「刷新→写 trace→再刷新」的死循环（真实踩过）。
+ *   需要固定位置时用 TRACE_DIR 显式指定（容器里建议挂载到日志卷）。
  * - `OTEL_EXPORTER_OTLP_ENDPOINT`：仅 `TRACE_EXPORT=otlp` 时使用；缺失则降级为 jsonl。
  */
 
@@ -36,8 +40,17 @@ export interface ObservabilityConfig {
   warnings: string[];
 }
 
-/** JSONL trace 默认落盘目录。`.lumenote-data/` 已在 .gitignore 中 */
-export const DEFAULT_TRACE_DIR = '.lumenote-data/traces';
+/**
+ * JSONL trace 默认落盘目录。
+ *
+ * ⚠️ 刻意放在**项目目录之外**（系统临时目录），而不是 `.lumenote-data/traces`：
+ * Next.js dev server（Turbopack）监听项目目录内的文件变化，trace 每写一行都会
+ * 触发一次热重载；浏览器刷新又产生新的请求 span，于是形成
+ * 「页面刷新 → 写 trace → 触发重载 → 页面刷新」的无限循环（实测复现过）。
+ * 临时目录不在 watcher 范围内，从根上避免该问题；生产容器通常也可写 /tmp。
+ * 需要持久化时用 TRACE_DIR 显式指向日志卷。
+ */
+export const DEFAULT_TRACE_DIR = path.join(os.tmpdir(), 'lumenote-traces');
 
 const TRACE_EXPORT_MODES: readonly TraceExportMode[] = ['jsonl', 'console', 'otlp', 'none'];
 

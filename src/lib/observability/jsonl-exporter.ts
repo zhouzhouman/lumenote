@@ -108,6 +108,15 @@ export interface JsonlSpanExporterOptions {
   now?: () => Date;
   /** 失败告警回调。默认 console.warn */
   warn?: (message: string) => void;
+  /**
+   * 只导出满足条件的 span。默认全部接受（测试可注入）。
+   *
+   * 生产路径（见 tracing.ts buildExporter）只接受 instrumentationScope.name === 'lumenote'
+   * 的 span：全局 provider 注册后，Next.js 内部也会通过 @opentelemetry/api 产生大量
+   * 框架 span（prepare route module / render route / GET /...）。它们对「按 taskId 检索」
+   * 没有价值，还会把 JSONL 撑大、增加 dev watcher 触发频率。
+   */
+  acceptSpan?: (span: ReadableSpan) => boolean;
 }
 
 /**
@@ -118,6 +127,7 @@ export interface JsonlSpanExporterOptions {
 export class JsonlSpanExporter implements SpanExporter {
   private readonly dir: string;
   private readonly now: () => Date;
+  private readonly acceptSpan: (span: ReadableSpan) => boolean;
   private readonly warn: (message: string) => void;
   /** 同一实例只告警一次，避免磁盘不可写时每条 span 刷一行日志 */
   private warned = false;
@@ -126,6 +136,7 @@ export class JsonlSpanExporter implements SpanExporter {
   constructor(options: JsonlSpanExporterOptions) {
     this.dir = options.dir;
     this.now = options.now ?? (() => new Date());
+    this.acceptSpan = options.acceptSpan ?? (() => true);
     this.warn =
       options.warn ??
       ((message) => {
@@ -138,7 +149,8 @@ export class JsonlSpanExporter implements SpanExporter {
     resultCallback: (result: { code: number; error?: Error }) => void,
   ): void {
     try {
-      if (spans.length === 0) {
+      const accepted = spans.filter((span) => this.acceptSpan(span));
+      if (accepted.length === 0) {
         resultCallback({ code: EXPORT_RESULT_SUCCESS });
         return;
       }
@@ -147,7 +159,7 @@ export class JsonlSpanExporter implements SpanExporter {
 
       // 按导出时刻分文件：长进程跨天时 span 会自然落到两天的文件里
       const file = path.join(this.dir, `${traceFileDate(this.now())}.jsonl`);
-      const payload = `${spans.map((span) => JSON.stringify(spanToRecord(span))).join('\n')}\n`;
+      const payload = `${accepted.map((span) => JSON.stringify(spanToRecord(span))).join('\n')}\n`;
       appendFileSync(file, payload, 'utf8');
 
       resultCallback({ code: EXPORT_RESULT_SUCCESS });

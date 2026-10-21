@@ -342,7 +342,8 @@ flowchart LR
   Serverless 只适合短任务，多实例**没有**队列/租约/全局重试（见 ADR-0005）；
 - Redis 只在 `RATE_LIMIT_DRIVER=redis` 时参与，**本机未安装**，真实连通性未验证；
 - OTLP 导出代码存在，但本环境没有 Collector，端到端未验证；默认 JSONL 落盘
-  `.lumenote-data/traces/`（已 gitignore）。
+  **系统临时目录**（`<tmp>/lumenote-traces`，可用 `TRACE_DIR` 覆盖；刻意不放在项目内，
+  避免 Next dev 的 watcher 因 trace 写入触发无限热重载）。
 
 ---
 
@@ -597,7 +598,7 @@ erDiagram
   agent.plan / agent.tool / agent.observe / agent.finalize / agent.evidence_check`；
 - `taskId` 通过 OTel Context（AsyncLocalStorage）贯穿，**不用全局变量** ——
   Next 并发处理多个任务，全局变量会把 A 任务的 taskId 写到 B 任务的 span 上；
-- 默认 JSONL 导出到 `.lumenote-data/traces/`（gitignore），`TRACE_EXPORT=otlp` 需自备 Collector；
+- 默认 JSONL 导出到**系统临时目录** `<tmp>/lumenote-traces`（可用 `TRACE_DIR` 覆盖；刻意不放在项目内，避免 Next dev watcher 热重载循环）；`TRACE_EXPORT=otlp` 需自备 Collector；
 - 生产默认关闭：trace 落盘会产生磁盘 IO 与用户内容的本地副本（已脱敏），应由运维显式开启；
 - 脱敏：不落 API Key / 完整 prompt / 文档正文，只留长度与哈希，另有属性键黑名单与
   `sk-...` 值级兜底（[src/lib/observability/sanitize.ts](../src/lib/observability/sanitize.ts)）；

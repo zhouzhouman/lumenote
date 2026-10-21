@@ -179,7 +179,13 @@ function buildExporter(config: ObservabilityConfig, warn: (message: string) => v
     }
     case 'jsonl':
     default:
-      return new JsonlSpanExporter({ dir: config.traceDir, warn });
+      return new JsonlSpanExporter({
+        dir: config.traceDir,
+        warn,
+        // 只落本应用的 span：全局 provider 注册后 Next.js 内部框架 span 也会被导出，
+        // 它们对 taskId 检索无价值，且会放大 dev 下的文件写入频率。
+        acceptSpan: (span) => span.instrumentationScope?.name === TRACER_NAME,
+      });
   }
 }
 

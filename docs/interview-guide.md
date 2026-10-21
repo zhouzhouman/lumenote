@@ -225,7 +225,7 @@ seed 的演示 Agent 任务（[prisma/seed.ts](../prisma/seed.ts)）写了 3 条
 - judge 未运行、人工校准未做 —— 所以没有「通过率 87%」这种数字可讲，只有机制。
 - 失败样本回归集 8/8 检出 + 2/2 对照组通过，证明断言能区分好坏输出。
 - 可观测性：任务级 OTel trace，`taskId` 贯穿 `task.pipeline / llm.request / agent.*`，
-  默认 JSONL 落盘 `.lumenote-data/traces/`（gitignore），`TRACE_EXPORT=otlp` 需自备 Collector。
+  默认 JSONL 落盘**系统临时目录** `<tmp>/lumenote-traces`（可用 `TRACE_DIR` 覆盖；刻意不放在项目内，避免 dev watcher 热重载循环），`TRACE_EXPORT=otlp` 需自备 Collector。
   属性脱敏（不落 prompt/正文/Key，只留长度与哈希）见
   [src/lib/observability/sanitize.ts](../src/lib/observability/sanitize.ts)。
   **OTLP 端到端未验证**（环境无 Collector）。

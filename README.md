@@ -405,7 +405,7 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
   报告中的通过率 / 延迟 / 成本**不代表真实模型质量**；
 - **judge 未运行、人工校准未做**；失败样本回归集 8/8 检出 + 2/2 对照组通过，证明断言有区分力；
 - 可观测性：任务级 OTel trace，`taskId` 贯穿 `task.pipeline / llm.request / agent.*`，
-  默认 JSONL 落盘 `.lumenote-data/traces/`（gitignore）；属性脱敏不落 prompt/正文/Key。
+  默认 JSONL 落盘**系统临时目录**（`<tmp>/lumenote-traces`，可用 `TRACE_DIR` 覆盖；刻意不放在项目内，避免 Next dev 的文件 watcher 被 trace 写入触发无限热重载）；属性脱敏不落 prompt/正文/Key。
   `TRACE_EXPORT=otlp` 需自备 Collector，**端到端未验证**。
 
 ---
