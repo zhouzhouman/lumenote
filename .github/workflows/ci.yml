@@ -178,7 +178,7 @@ jobs:
 
       - name: 上传集成测试日志
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: integration-log
           path: integration.log
@@ -289,7 +289,7 @@ jobs:
       # 即使覆盖率测试失败也要留下报告，便于定位
       - name: 上传覆盖率报告
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage/
@@ -364,7 +364,7 @@ jobs:
 
       - name: 上传 gitleaks 报告
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gitleaks-report
           path: gitleaks-report.json
