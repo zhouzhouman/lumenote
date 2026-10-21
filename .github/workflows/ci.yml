@@ -312,7 +312,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 依赖变更审查（漏洞 / license / 新增依赖）
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
         with:
           # 高危及以上直接阻断；低危只提示不阻断
           fail-on-severity: high
