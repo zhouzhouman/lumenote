@@ -101,6 +101,45 @@ Node 标准库没有这套算法，脚本因此依赖 `libsodium-wrappers`。
 前提：宿主机装了 Docker（Windows 需要 Docker Desktop + WSL2 后端）。
 **只下载安装包不算装好** —— 判断标准是 `docker version` 能打印出 Server 版本。
 
+### 2.0 Windows 前置条件：WSL2（实测踩坑）
+
+`Docker Desktop.exe` 装完、托盘图标也在，但 `docker info` 报：
+
+```
+Error response from daemon: Docker Desktop is unable to start
+```
+
+真正的原因藏在 `%LOCALAPPDATA%\Docker\log\host\docker-desktop.exe.log` 里：
+
+```
+stopReason: "engine linux/wsl failed to start: checking preconditions:
+             checking WSL version: wsl is not installed"
+```
+
+也就是说**Docker Desktop 装了，但 Linux 虚拟机后端没有**（WSL 的内核/可选功能没启用）。
+`wsl.exe` 文件存在也没用 —— 它只是个入口，功能未启用时跑 `wsl --version` 会提示缺少内核。
+
+解决（**管理员** PowerShell，需要重启）：
+
+```powershell
+# 方式一：一条命令（Windows 11）
+wsl --install --no-distribution
+
+# 方式二：手动启用两个可选功能，再装内核
+dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+wsl --update
+# 然后重启
+```
+
+重启后再开 Docker Desktop，`docker info --format '{{.ServerVersion}}'` 应该打印版本号。
+
+前置条件是 CPU 虚拟化已开（任务管理器 → 性能 → CPU → 「虚拟化：已启用」）。
+本机实测：Windows 11 Build 26300、虚拟化已开、Hypervisor 已存在，
+所以只缺 WSL 这一层。
+
+> agent 沙箱把 `wsl.exe` 加入了程序黑名单，所以这一步必须由你本人在管理员终端执行。
+
 ```bash
 docker compose config          # 1. 渲染配置：变量插值、profile、healthcheck 是否合法
 docker build -t lumenote-app:local --target runner .    # 2. 应用镜像
