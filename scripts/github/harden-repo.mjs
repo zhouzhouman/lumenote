@@ -25,6 +25,11 @@
  *   # 4) 写入 Secrets（值从 .env.local 读，不回显）
  *   node scripts/github/harden-repo.mjs secrets --from-env-local DEEPSEEK_API_KEY
  *
+ *   # 4b) 从任意文件读值（命令里只有路径，避免 token 进 shell 历史/进程列表）
+ *   node scripts/github/harden-repo.mjs secrets \
+ *     --set REGISTRY=ghcr.io --set REGISTRY_USER=your-username \
+ *     --from-file REGISTRY_TOKEN=/path/to/token.txt
+ *
  *   # 5) 首次 CI 绿了之后，再把两个慢 job 加进 required checks
  *   node scripts/github/harden-repo.mjs protect \
  *     --checks "verify,secret-scan,dependency-review,integration,rate-limit-redis"
@@ -96,6 +101,21 @@ function parseArgs(argv) {
       opts.fromEnvLocal.push(pair.slice(0, eq));
       opts.setValues = opts.setValues ?? {};
       opts.setValues[pair.slice(0, eq)] = pair.slice(eq + 1);
+    } else if (arg === '--from-file') {
+      /**
+       * 从文件读值：`--from-file NAME=/path/to/file`
+       *
+       * 为什么需要它：`--set NAME=VALUE` 会把明文留在 shell 历史与进程列表里
+       * （ps 能看到命令行）。token 这类长期凭据更适合先落到一个文件，
+       * 再让脚本自己去读 —— 命令里只有路径，没有值。
+       */
+      const pair = rest[++i] ?? '';
+      const eq = pair.indexOf('=');
+      if (eq < 0) fail(`--from-file 需要 NAME=PATH 形式，收到：${pair}`);
+      const name = pair.slice(0, eq);
+      opts.fromEnvLocal.push(name);
+      opts.fileValues = opts.fileValues ?? {};
+      opts.fileValues[name] = pair.slice(eq + 1);
     } else {
       fail(`未知参数：${arg}`);
     }
@@ -272,15 +292,17 @@ function readEnvFile(name) {
 }
 
 async function setSecrets(tok, repo, opts) {
-  if (opts.fromEnvLocal.length === 0) fail('没有要写的 secret：用 --from-env-local NAME 或 --set NAME=VALUE');
+  if (opts.fromEnvLocal.length === 0) fail('没有要写的 secret：用 --from-env-local NAME / --set NAME=VALUE / --from-file NAME=PATH');
   const [owner, name] = repo.split('/');
   const sodium = await loadSodium();
   const { key, key_id } = await api(tok, 'GET', `/repos/${owner}/${name}/actions/secrets/public-key`);
 
   for (const secretName of opts.fromEnvLocal) {
-    const value = opts.setValues?.[secretName] ?? readEnvFile(secretName);
+    // 取值优先级：--set 显式值 > --from-file 指定文件 > .env.local / .env
+    const filePath = opts.fileValues?.[secretName];
+    const value = opts.setValues?.[secretName] ?? (filePath ? readValueFile(filePath) : readEnvFile(secretName));
     if (!value) {
-      console.log(`  ⚠ ${secretName}：本地为空，跳过（镜像相关变量留空时流水线会自动跳过发布）`);
+      console.log(`  ⚠ ${secretName}：取值为空，跳过（镜像相关变量留空时流水线会自动跳过发布）`);
       continue;
     }
     const sealed = sodium.crypto_box_seal(value, sodium.from_base64(key, sodium.base64_variants.ORIGINAL));
@@ -288,9 +310,15 @@ async function setSecrets(tok, repo, opts) {
       encrypted_value: sodium.to_base64(sealed, sodium.base64_variants.ORIGINAL),
       key_id,
     });
-    // 只打印长度与首尾，绝不回显明文
+    // 只打印长度，绝不回显明文
     console.log(`  ✓ ${secretName}（${value.length} 字符）已写入`);
   }
+}
+
+/** 从任意文件读一个值（去掉首尾空白与可能的 BOM） */
+function readValueFile(filePath) {
+  if (!fs.existsSync(filePath)) fail(`--from-file 指定的文件不存在：${filePath}`);
+  return fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '').trim();
 }
 
 async function status(tok, repo) {
