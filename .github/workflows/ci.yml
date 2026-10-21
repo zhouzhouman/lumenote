@@ -43,7 +43,7 @@ jobs:
       # 缓存 pnpm store 而不是 node_modules：
       # node_modules 里有平台相关的二进制，跨平台缓存不可靠；
       # store 是内容寻址的，可安全跨平台复用。
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: 'pnpm'
@@ -139,7 +139,7 @@ jobs:
         with:
           version: ${{ steps.pnpm-version.outputs.version }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: 'pnpm'
@@ -230,7 +230,7 @@ jobs:
         with:
           version: ${{ steps.pnpm-version.outputs.version }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: 'pnpm'
@@ -266,7 +266,7 @@ jobs:
         with:
           version: ${{ steps.pnpm-version.outputs.version }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: 'pnpm'
