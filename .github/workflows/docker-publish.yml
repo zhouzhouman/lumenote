@@ -62,7 +62,14 @@ jobs:
         if: steps.creds.outputs.ready == 'true'
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.REGISTRY }}/lumenote
+          # ⚠️ 镜像路径必须带**命名空间**，不能只拼 registry + 仓库名。
+          # GHCR 的合法路径是 `ghcr.io/所有者/仓库名`，写成 `ghcr.io/lumenote`
+          # 会直接被拒绝（推送 403/400）。这里用 github.repository（即
+          # `所有者/仓库名`）作为命名空间段：
+          #   GHCR    → ghcr.io/zhouzhouman/lumenote
+          #   其他仓库 → registry/所有者/仓库名（如阿里云 ACR 的命名空间）
+          # metadata-action 会自动把整串转成小写，满足 GHCR 的要求。
+          images: ${{ secrets.REGISTRY }}/${{ github.repository }}
           tags: |
             type=sha,format=long
             type=raw,value=latest
