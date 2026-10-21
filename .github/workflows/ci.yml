@@ -147,9 +147,10 @@ jobs:
         run: pnpm prisma:generate
 
       - name: 集成测试（harness 自管 schema / migrate / seed / next dev）
-        # 失败时把日志尾部写进 Job Summary：Actions 日志需要登录才能看，
-        # 而 Summary 在公开仓库上是可读的。集成测试的失败原因几乎总在
-        # 「migrate / seed / next dev 启动」这段子进程输出里，必须能被看到。
+        # 失败时把日志尾部写进 Job Summary + 一条 error 注解。
+        # Actions 日志需要登录才能看，而 Summary 与注解在公开仓库上可读 ——
+        # 集成测试的失败原因几乎总在「migrate / seed / next dev 启动」这段
+        # 子进程输出里，看不到就等于不可诊断。
         run: |
           set +e
           set -o pipefail
@@ -163,6 +164,9 @@ jobs:
               tail -c 12000 integration.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # 注解只放最后 25 行：够定位，又不会把 Checks 页面刷爆
+            detail=$(tail -25 integration.log | sed 's/%/%25/g' | tr '\n' '|' | cut -c1-6000)
+            echo "::error title=集成测试失败::${detail}"
           fi
           exit $code
 
@@ -346,6 +350,9 @@ jobs:
               echo "| --- | --- | --- | --- |"
               jq -r '.[] | "| \(.RuleID) | \(.File) | \(.StartLine) | `\((.Match // "")[0:60])` |"' gitleaks-report.json 2>/dev/null | head -50
             } >> "$GITHUB_STEP_SUMMARY"
+            # 注解里只放「规则@文件:行」，不放片段：注解比 Summary 更容易被转发出去
+            detail=$(jq -r '.[:20][] | "\(.RuleID)@\(.File):\(.StartLine)"' gitleaks-report.json 2>/dev/null | tr '\n' '|')
+            [ -n "$detail" ] && echo "::error title=gitleaks 命中::${detail}"
           fi
           exit $code
 
