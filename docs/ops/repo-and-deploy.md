@@ -101,6 +101,54 @@ Node 标准库没有这套算法，脚本因此依赖 `libsodium-wrappers`。
 | `RESEND_API_KEY` | 生产邮件发验证码 | 只能用 `MAIL_TRANSPORT=console`，验证码打到日志 |
 | `DEEPSEEK_API_KEY` | 真实模型评测 job | 评测只能跑 mock 分支 |
 
+### 1.6 镜像发布（GHCR 实测配置）
+
+三个值（GHCR 场景）：
+
+| Name | 值 |
+| --- | --- |
+| `REGISTRY` | `ghcr.io` |
+| `REGISTRY_USER` | GitHub **用户名**（不是邮箱） |
+| `REGISTRY_TOKEN` | classic PAT，scope 勾 `write:packages`（`repo` 不够，推包要单独这个） |
+
+镜像路径由 `docker-publish.yml` 里的
+`images: ${{ secrets.REGISTRY }}/${{ github.repository }}` 拼出来：
+
+```
+ghcr.io/zhouzhouman/lumenote:latest
+ghcr.io/zhouzhouman/lumenote:sha-<40 位 commit>
+```
+
+> ⚠️ 早期写法是 `${REGISTRY}/lumenote`，拼出 `ghcr.io/lumenote` —— **缺所有者段，
+> GHCR 会直接拒绝**。`registry/owner/repo` 三段缺一不可。
+
+**怎么验证发布是否成功**（不要靠 push main 试）：
+
+```bash
+# 手动触发，不动代码
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  https://api.github.com/repos/zhouzhouman/lumenote/actions/workflows/docker-publish.yml/dispatches \
+  -d '{"ref":"main"}'
+```
+
+然后看 `https://github.com/zhouzhouman?tab=packages`。
+命令行查（token 需要 `read:packages`）：
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://api.github.com/user/packages/container/lumenote/versions" \
+  | jq -r '.[] | .metadata.container.tags'
+```
+
+**两个注意点**：
+
+1. **包默认 private**。要别人能 `docker pull`，得在包设置里改成 public：
+   `https://github.com/users/zhouzhouman/packages/container/package/lumenote/settings`
+2. **国内 `docker pull ghcr.io` 通常需要代理**，和拉 Docker Hub 同理。给自己用的话，
+   阿里云 ACR 的免费个人版更顺手（`REGISTRY` 换成 `registry.cn-hangzhou.aliyuncs.com`，
+   镜像路径需要改 `images:` 那行）。
+
+
 ---
 
 ## 2. Docker 主部署路径验证
