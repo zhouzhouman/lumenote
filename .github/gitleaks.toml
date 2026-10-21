@@ -29,3 +29,17 @@ regexes = [
   '''ci-secret-at-least-32-characters-long-xxxx''',
   '''test-secret-that-is-at-least-32-characters-long''',
 ]
+
+# scripts/verify/byok.e2e.mjs 里的 4 个 key 是**验收脚本自己造出来的假值**：
+# 它们被写进数据库、再从接口读回来，用来断言「读取接口只返回掩码」。
+# 第二阶段还会把凭证指向 127.0.0.1:9（无人监听），保证不会产生真实调用。
+# 但它们的形状（sk- + 高熵后缀）与 generic-api-key 规则高度相似，会被误报，
+# 所以按精确值豁免 —— 仍然不用整文件豁免，避免这个文件以后被塞进真 key 时漏检。
+[[allowlists]]
+description = "BYOK 验收脚本中的伪 key（不产生真实调用）"
+regexes = [
+  '''sk-verify-secret-alpha-0123456789abcdef''',
+  '''sk-verify-secret-beta-9876543210zyxwvu''',
+  '''sk-verify-secret-gamma-5555555555qwerty''',
+  '''sk-e2e-credential-secret-abcdef1234567890''',
+]

@@ -20,6 +20,8 @@
     "test:redis": "node scripts/verify/rate-limit-redis.mjs",
     "smoke": "node scripts/smoke.mjs",
     "eval:report": "tsx scripts/eval/report.ts",
+    "github:status": "node scripts/github/harden-repo.mjs status",
+    "github:protect": "node scripts/github/harden-repo.mjs protect",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
