@@ -59,21 +59,15 @@ FROM base AS builder
 #    output='standalone'；只在本地碰巧设置的话，镜像里的 `pnpm build`
 #    会退化成普通构建，runner 的 `node server.js` 直接不存在。
 #  - NEXT_TELEMETRY_DISABLED 避免构建期外联，也让构建可复现。
-#  - DATABASE_URL / AUTH_SECRET 是**构建期占位值**，不是真实凭据。
-#    原因：next build 在「收集页面数据」阶段会 import 路由模块，而
-#    src/lib/db.ts 在**模块加载期**就 new PrismaClient —— 缺 DATABASE_URL
-#    直接抛错，整个构建失败（实测报错）：
-#        Failed to collect configuration for /api/auth/refresh
-#        Error: DATABASE_URL 未配置，无法初始化 Prisma Client
-#    src/lib/env.ts 的 schema 校验同理。CI 的 verify job 也是这么做的。
-#    这两个值只存在于 builder 阶段：runner 阶段有自己的 ENV，运行时真实值
-#    由 compose / 平台注入，所以占位值不会进入最终镜像，也不会被拿去连库。
-#    取值刻意复用 CI 里已有的合法假值，避免 secret-scan 把它们当成新凭据。
+#
+# ⚠️ 这里**刻意不注入** DATABASE_URL / AUTH_SECRET。
+#    next build 会 import 每个路由模块，如果模块顶层就要连库，构建环境就必须
+#    伪造一份 DATABASE_URL 才能过（CI 的 verify job 正是这么做的）。
+#    现在 src/lib/db.ts 与 src/lib/env.ts 都是延迟求值，构建期不需要任何连接串，
+#    所以这里保持「无 env 也能构建」——这条约束就是回归防线：
+#    哪天有人把顶层求值的代码加回来，`docker build` 会立刻失败。
 ENV NEXT_TELEMETRY_DISABLED=1 \
-    BUILD_STANDALONE=true \
-    DATABASE_URL="postgresql://u:p@localhost:5432/test" \
-    AUTH_SECRET="test-secret-that-is-at-least-32-characters-long" \
-    DEFAULT_MODEL="deepseek-flash"
+    BUILD_STANDALONE=true
 
 COPY --from=deps /app/node_modules ./node_modules
 # .dockerignore 已排除 .env*、.git、node_modules、.next 等，这里拿到的是

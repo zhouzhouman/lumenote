@@ -162,18 +162,25 @@ curl -s localhost:3000/api/health                        # 6. 必须 200 且 db.
    而官方 `postgres:16-alpine` **不含 pgvector**。必须用
    `pgvector/pgvector:pg16`（官方 PG16 + 预编译扩展）。`docker-compose.yml`
    与 CI 的 integration job 都已固定成该镜像。
-2. **`DATABASE_URL 未配置，无法初始化 Prisma Client`（构建期）**
-   `next build` 在「收集页面数据」阶段会 import 路由模块，而 `src/lib/db.ts`
-   在**模块加载期**就 `new PrismaClient()`，缺 `DATABASE_URL` 直接抛错：
+2. **`DATABASE_URL 未配置，无法初始化 Prisma Client`（构建期）— 已从根因修复**
+   `next build` 在「收集页面数据」阶段会 import 每个路由模块，而 import 会执行
+   模块顶层代码。`src/lib/db.ts` 原本在**顶层**就 `new PrismaClient()`，于是任何
+   没有连接串的构建环境都会失败：
 
    ```
    Failed to collect configuration for /api/auth/refresh
    Error: DATABASE_URL 未配置，无法初始化 Prisma Client
+     at src/lib/db.ts:19
    ```
 
-   builder 阶段因此显式设置了 `DATABASE_URL` / `AUTH_SECRET` 的**占位值**
-   （见 Dockerfile 注释）。它们不会进入 runner 镜像，运行时真实值由 compose 注入。
-   **不要删这两行**，删了镜像就构建不出来。
+   **根因是模块加载期副作用**，不是缺 env。修法是把创建推迟到第一次真正使用
+   （`db.ts` 导出一个惰性 Proxy，调用点零改动），与 `src/lib/env.ts` 已有的
+   延迟解析保持一致。
+
+   因此 Dockerfile 的 builder 阶段**刻意不注入** `DATABASE_URL`：
+   「无 env 也能构建」本身就是回归防线 —— 谁再写顶层求值的代码，
+   `docker build` 会立刻失败。CI 的 verify job 仍会注入假值（历史写法），
+   不影响这条约束。
 3. **`AUTH_SECRET` 未设置**：compose 用 `${AUTH_SECRET:?...}` 写成 fail fast，
    缺了直接报错退出，而不是用默认密钥跑起来。
 4. **`.env.local` 不能直接喂给容器**：它里面 `NODE_ENV=development`，
