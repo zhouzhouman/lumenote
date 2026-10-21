@@ -27,7 +27,7 @@
  *
  *   # 5) 首次 CI 绿了之后，再把两个慢 job 加进 required checks
  *   node scripts/github/harden-repo.mjs protect \
- *     --checks "CI / verify,CI / secret-scan,CI / dependency-review,CI / integration,CI / rate-limit-redis"
+ *     --checks "verify,secret-scan,dependency-review,integration,rate-limit-redis"
  *
  * ## token 需要什么权限
  *
@@ -53,11 +53,24 @@ import fs from 'node:fs';
 const require = createRequire(import.meta.url);
 
 const API = 'https://api.github.com';
+
+/**
+ * required status checks 的 context 必须写 **job 名**，不是「工作流名 / job 名」。
+ *
+ * ⚠️ 这是实测踩出来的坑：网页上分支保护的检查项列表显示成 `CI / verify`
+ * （工作流名 + job 名），很容易照着抄。但 GitHub 匹配时用的是 check-run 的
+ * name —— 而 Actions 上报的 check-run name 就是 job 名本身（`verify`）。
+ *
+ * 写成 `CI / verify` 的后果非常隐蔽：
+ *   - 规则看起来配好了，UI 上也列着；
+ *   - 但永远匹配不上 → 所有 PR 都是 `mergeable_state: blocked`；
+ *   - 管理员因为 enforce_admins=false 还能合，于是问题被掩盖。
+ */
 const DEFAULT_CHECKS = [
   // 前三个是「每次 PR 都必须绿」的硬门禁
-  'CI / verify',
-  'CI / secret-scan',
-  'CI / dependency-review',
+  'verify',
+  'secret-scan',
+  'dependency-review',
 ];
 
 // ---------------------------------------------------------------------------
