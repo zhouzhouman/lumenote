@@ -59,17 +59,52 @@ export interface PreparedPipeline {
  * 任务慢时能一眼分清是「准备阶段慢」还是「模型调用慢」。
  */
 export async function prepareSummarizeTask(taskId: string): Promise<PreparedPipeline> {
-  return withSpan('task.lifecycle', { taskId }, async (span) => {
-    const prepared = await prepareSummarizeTaskCore(taskId);
-    setSpanAttributes(span, {
-      type: prepared.task.type,
-      model: prepared.ctx.defaultModel,
-      promptVersionId: prepared.promptVersionId,
-      chunkCount: prepared.chunks.length,
-      inputLength: prepared.input.length,
+  try {
+    return await withSpan('task.lifecycle', { taskId }, async (span) => {
+      const prepared = await prepareSummarizeTaskCore(taskId);
+      setSpanAttributes(span, {
+        type: prepared.task.type,
+        model: prepared.ctx.defaultModel,
+        promptVersionId: prepared.promptVersionId,
+        chunkCount: prepared.chunks.length,
+        inputLength: prepared.input.length,
+      });
+      return prepared;
     });
-    return prepared;
+  } catch (error) {
+    /**
+     * 兜底：准备阶段任何**未被内部处理**的异常，都必须把任务落为 failed。
+     *
+     * 真实踩过的坑：模板变量校验（`validateVariables`）抛错时没有调用
+     * `failTask`，而路由的 `after()` 只 `console.error` 不再改状态 ——
+     * 任务于是永久停在 `running`，既占住用户的并发上限，也无法重试
+     * （之后的创建请求全部 429 TOO_MANY_RUNNING）。
+     *
+     * 这里按「当前是否仍未终态」决定是否补写 failed，避免覆盖内层已经写好的
+     * 具体错误码（如 INPUT_EMPTY / UNSUPPORTED_TASK_TYPE）。
+     */
+    await markPrepareFailure(taskId, error).catch(() => undefined);
+    throw error;
+  }
+}
+
+/** 准备阶段失败兜底：仅在任务仍未终态时补写 failed。永不抛错（调用方负责 rethrow 原错误） */
+async function markPrepareFailure(taskId: string, error: unknown): Promise<void> {
+  const current = await prisma.task.findUnique({
+    where: { id: taskId },
+    select: { status: true },
   });
+  if (!current || current.status === 'succeeded' || current.status === 'failed') return;
+
+  const name = (error as { name?: unknown } | null)?.name;
+  const code =
+    error instanceof LLMError
+      ? error.code
+      : name === 'TemplateRenderError'
+        ? 'INVALID_PARAMS'
+        : 'TASK_PREPARE_FAILED';
+  const message = error instanceof Error ? error.message : String(error);
+  await failTask(taskId, code, message);
 }
 
 async function prepareSummarizeTaskCore(taskId: string): Promise<PreparedPipeline> {
