@@ -27,25 +27,29 @@ Lumenote 的每条结果都能回答三个问题：
 
 ## 验证状态（先看这一节）
 
-> 核对于 **2026-10-20**，Node v22.15.0 / pnpm 10.33.2 / PostgreSQL 16。
+> 核对于 **2026-10-21**，Windows 11 + Node v22.22 / pnpm 10.33.2 / PostgreSQL 16 /
+> Docker Desktop 29.9.1（WSL2 后端）。数字以 **GitHub Actions 上的实跑日志**为准，
+> 不用本地跑结果顶替（本地 Vitest 会因环境沙箱写缓存报 `EPERM`，见文末「已知限制」）。
 > 原则：**没跑过的验证不写成"已通过"**，只写「未运行」并给原因。
 
 | 项目 | 命令 | 本次实测结果 | 状态 |
 |---|---|---|---|
-| 单元测试 | `pnpm test` | 32 文件 / **661 测试**全部通过 | ✅ 已运行 |
-| 集成测试 | `pnpm test:integration` | 8 文件 / **23 测试**（真实 PostgreSQL + `next dev`） | ✅ 已运行 |
-| 覆盖率 | `pnpm test:coverage` | statements 41.03 / branches 82.90 / functions 71.64 / lines 41.03；阈值 41/82/71/41 | ✅ 已运行，退出码 0（只统计 `src/lib/**`，见测试章节口径说明） |
+| 单元测试 | `pnpm test` | 32 文件 / **662 测试**全部通过 | ✅ 已运行（CI） |
+| 集成测试 | `pnpm test:integration` | 8 文件 / **23 测试**（真实 PostgreSQL 容器 + `next dev`） | ✅ 已运行（CI） |
+| 覆盖率 | `pnpm test:coverage` | statements **52.4** / branches **83.38** / functions **73.63** / lines **52.4**；阈值 41/82/71/41 | ✅ 已运行，退出码 0（只统计 `src/lib/**`，见测试章节口径说明） |
 | 生产构建 | `pnpm build` | 29 条路由（`Route (app)` 表）+ `ƒ Proxy (Middleware)`；无 middleware 弃用警告 | ✅ 已运行 |
 | 端到端冒烟 | `pnpm smoke` | Mock 模式 **28 断言**全部通过（登录→建任务→SSE→幂等重放）；脚本**强制** `MOCK_LLM=true` 并清空三家厂商 Key，永不产生真实费用 | ✅ 已运行 |
 | 评测报告 | `MOCK_LLM=true pnpm eval:report` | Mock 模式生成 [docs/eval-report.md](docs/eval-report.md) | ✅ 已运行（**不代表真实模型质量**） |
 | standalone 产物 | `verify-standalone.mjs` | 按镜像布局 `node server.js`，**20/20** 断言，`/api/health` 200 且 `db.ok=true` | ✅ 已运行 |
-| Docker 构建/编排 | `docker build` / `docker compose` | — | ❌ **未运行**（本机未安装 Docker；仅 PyYAML 静态校验 51/51） |
-| 真实 Redis 限流 | `pnpm test:redis` | `SKIPPED`（退出码 2 = 未验证） | ❌ 未运行（本机无 Redis；CI job 从未在 GitHub 跑过） |
-| GitHub Actions | — | 仓库还没有 remote | ❌ 未运行（只用 actionlint 1.7.12 + PyYAML 校验过 YAML） |
+| Docker 构建/编排 | `docker compose build` / `run --rm migrate` / `up -d app` | 镜像 `lumenote-app:local` **309 MB**，不含 dev 工具链（`vite`/`vitest`/`eslint`/`typescript` 均不存在），仅 6 个被 Next 追踪的源文件（80 KB）；**6 个迁移全部应用**；`/api/health` 200 `db.ok=true`；库内 21 表 + `vector 0.8.7` | ✅ 已运行（WSL2 + Docker Desktop 实测，详见 [docs/ops/repo-and-deploy.md](docs/ops/repo-and-deploy.md)） |
+| 真实 Redis 限流 | `pnpm test:redis` | **12 项检查全过** | ✅ 已运行（三处：本机 Redis 3.2、容器 `redis:7`、CI service） |
+| GitHub Actions | `CI` / `Docker Publish` | 5 个 job 全绿（verify / integration / coverage / secret-scan / rate-limit-redis）；`dependency-review` 仅在 PR 上运行 | ✅ 已运行（[Actions](https://github.com/zhouzhouman/lumenote/actions)），镜像已推送 GHCR |
 | 真实模型评测 | `pnpm eval:report`（MOCK_LLM=false） | — | ❌ 未运行（无 Key、明确零费用；judge 未校准） |
 
 > 为什么把这张表放最前面：这个项目最值得讲的是「**区分已验证与未验证**」的工程习惯。
-> 面试时被问「Docker 跑过吗」，正确回答是「没有，只有 standalone 等价验证」——不是「应该可以」。
+> 面试时被问「Docker 跑过吗」，现在的回答是「跑过，六步都跑通了，包括一次性迁移和健康检查」；
+> 被问「真实模型效果如何」，回答是「**没测过**——本地 `MOCK_LLM=true`、Key 已移出仓库，
+> `docs/eval-report.md` 是 Mock 链路的产物，不代表模型质量」。两者都不含糊。
 
 **截图均为真实运行截图**（Mock 模式 dev server + 系统 Chrome 渲染，非设计稿）：
 生成脚本 [scripts/demo/capture-screenshots.mjs](scripts/demo/capture-screenshots.mjs)，
@@ -126,7 +130,7 @@ psql -U postgres -c "CREATE DATABASE lumenote_test OWNER lumenote;"
 - **鉴权**：自建 JWT（access 15min + refresh 7 天轮换）+ bcrypt + 邮箱验证码
 - **限流**：store 抽象，`memory`（默认）/ `redis`（多实例共享）
 - **可观测性**：OpenTelemetry tracing（JSONL / OTLP exporter）+ 数据库指标聚合
-- **测试**：Vitest 2（32 文件 / 661 单测）+ 真实 Postgres 集成测试（8 文件 / 23 测试）+ Playwright 截图脚本
+- **测试**：Vitest 2（32 文件 / 662 单测）+ 真实 Postgres 集成测试（8 文件 / 23 测试）+ Playwright 截图脚本
 
 ---
 
@@ -344,10 +348,10 @@ node scripts/verify/byok.e2e.mjs
 
 | 命令 | 做什么 | 环境要求 | 本次是否运行 |
 |---|---|---|---|
-| `pnpm test` | 单元测试（纯逻辑，不连库/不联网） | 无 | ✅ 661 全过 |
-| `pnpm test:integration` | 真实 Postgres + 真实 HTTP 集成测试 | PostgreSQL 16 测试库；**先停掉 dev server**（Next 16 每项目只允许一个 dev server） | ✅ 23 全过 |
-| `pnpm test:coverage` | 单测 + 覆盖率（只统计 `src/lib/**`） | 无 | ✅ 41.03 / 82.90 / 71.64 / 41.03，阈值 41/82/71/41，退出码 0 |
-| `pnpm test:redis` | 真实 Redis 限流验证（Lua 原子性 / TTL） | 可达 Redis | ❌ SKIPPED（退出码 2 = 未验证） |
+| `pnpm test` | 单元测试（纯逻辑，不连库/不联网） | 无 | ✅ 662 全过（CI） |
+| `pnpm test:integration` | 真实 Postgres + 真实 HTTP 集成测试 | PostgreSQL 16 测试库；**先停掉 dev server**（Next 16 每项目只允许一个 dev server） | ✅ 23 全过（CI） |
+| `pnpm test:coverage` | 单测 + 覆盖率（只统计 `src/lib/**`） | 无 | ✅ 52.4 / 83.38 / 73.63 / 52.4，阈值 41/82/71/41，退出码 0 |
+| `pnpm test:redis` | 真实 Redis 限流验证（Lua 原子性 / TTL） | 可达 Redis | ✅ 12 项通过（本机 3.2 / 容器 7 / CI 均验过） |
 | `pnpm smoke` | 端到端冒烟：登录→建任务→轮询→SSE→幂等重放 | PostgreSQL；自动起 dev server（3200）；脚本强制 Mock 并清空厂商 Key，**不产生真实费用** | ✅ 28 断言 |
 | `MOCK_LLM=true pnpm eval:report` | 生成评测报告 + trace | PostgreSQL | ✅ 仅 Mock 模式 |
 | `node scripts/docker/verify-standalone.mjs` | standalone 产物按镜像布局验证 | 先 `BUILD_STANDALONE=true pnpm build` | ✅ 20/20 |
@@ -386,13 +390,15 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
 还有一类**运行环境测试**（`tests/ssr-safety.test.tsx`）：在无 `window` 的环境里真的渲染一次
 客户端组件 —— `tsc` 与 ESLint 都不做运行环境检查。
 
-### 覆盖率为什么只有 ~41%
+### 覆盖率为什么只有 ~52%
 
 覆盖率只统计 `src/lib/**` 的纯逻辑，**不包含路由、页面、SSE、数据库路径** ——
-这些由集成测试覆盖。所以 41% 不代表产品整体验证程度，也不要把数字当质量结论。
-阈值是防倒退用的（**41/82/71/41**，2026-10-20 按实测基线向下取整），
-当前实测 41.03 / 82.90 / 71.64 / 41.03，`pnpm test:coverage` **退出码 0**；
-未来覆盖率下降会让 CI 失败。
+这些由集成测试覆盖。所以 52% 不代表产品整体验证程度，也不要把数字当质量结论。
+
+阈值是防倒退用的（**41/82/71/41**，2026-10-20 按当时基线向下取整）。
+当前实测已涨到 **52.4 / 83.38 / 73.63 / 52.4**，`pnpm test:coverage` **退出码 0**。
+阈值刻意**没有跟着上调**：上调会让 CI 门禁更紧，需要单独评审（避免因为一次波动的运行
+就把 main 卡住）。要涨的话按 `vitest.config.ts` 注释里的约定取整即可。
 
 ---
 
@@ -444,13 +450,21 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
    彻底修法是把检查与插入放进 `Serializable` 事务或用户级咨询锁。
 5. **MockProvider 不支持 tools**：`MOCK_LLM=true` 时新建 Agent 任务只有 1 步 finalize、
    `structured=null`、证据 rate=0；证据演示请用 seed 的演示任务。
-6. **Docker / Redis / 真实模型 / GitHub Actions 均未在本环境实际运行**：
-   - 无 Docker → `docker build` / `docker compose config` / `docker run` 未运行；
-     只有 standalone 产物 `node server.js`（20/20）与 PyYAML 静态校验（51/51）；
-   - 无 Redis → `pnpm test:redis` SKIPPED（退出码 2）；CI 的 `rate-limit-redis` job 从未在 GitHub 跑过；
-   - 无真实 Key → 真实模型评测未运行、零费用；judge 未校准；
-   - 仓库没有 remote → CI workflow 未在 GitHub 运行，只做过 actionlint + PyYAML 校验。
-7. **覆盖率只代表纯逻辑**：`pnpm test:coverage` 只统计 `src/lib/**`（41% 左右），
+6. **真实模型评测仍未运行**（这是当前唯一真正没跑的一项）：
+   - 无真实 Key（已移出仓库，只存在于 GitHub Actions Secret）→ `MOCK_LLM=false` 的
+     评测从未执行、零费用；judge 未校准，因此**没有任何真实模型质量的结论**；
+   - `docs/eval-report.md` 是 Mock 链路的产物，只证明报告生成链路可用。
+
+   > 历史说明：2026-10-21 之前这里列的是「Docker / Redis / GitHub Actions 均未运行」。
+   > 那一天补跑了这三项并全部通过，同时踩到三个环境前提，记在这里免得别人重踩：
+   > ① Windows 上 Docker Desktop 依赖 **WSL2**，`wsl` 未安装时它只报
+   > 「Docker Desktop is unable to start」这种无信息量的错误；
+   > ② Docker 默认走**系统代理**，代理软件没启动时拉镜像会报
+   > `connectex: ... connecting via static system HTTPS proxy`；
+   > ③ Postgres 镜像**必须带 pgvector**（`pgvector/pgvector:pg16`），
+   > 官方 `postgres:16-alpine` 会让 init 迁移以 `E0A000 extension "vector" is not available` 失败。
+   > 完整步骤见 [docs/ops/repo-and-deploy.md](docs/ops/repo-and-deploy.md)。
+7. **覆盖率只代表纯逻辑**：`pnpm test:coverage` 只统计 `src/lib/**`（当前约 52%），
    路由/SSE/数据库事务这些真正容易出问题的路径由集成测试覆盖；
    不要把覆盖率数字当成产品整体验证程度。
 8. **更换 `AUTH_SECRET` 会导致已保存的 BYOK 密钥全部无法解密**（用户需重填）——
@@ -486,6 +500,10 @@ docker compose run --rm migrate
 
 # 3. 起应用（只连库，不碰 schema）
 docker compose --profile app up -d app
+
+# 4. 判定标准：两条都必须满足
+docker compose run --rm migrate   # 重跑也必须是 0（迁移幂等）
+curl -s localhost:3000/api/health # 200 且 "db":{"ok":true}
 ```
 
 必需的环境变量（通过 `.env` / shell / 平台 Secret 注入，镜像内不含 `.env`）：
@@ -502,9 +520,14 @@ docker compose --profile app up -d app
 | `RATE_LIMIT_PER_MINUTE` | ⚠️ **当前未接入路由**：`rateLimitByIp()` 没有调用点，该值仅保留给限流 store / 后续接入；实际生效的是 auth 与任务创建维度的限流桶 |
 | `NEXT_PUBLIC_APP_URL` | 站点地址（生产 HTTPS） |
 
-> ⚠️ **本环境未运行 `docker build` / `docker compose config`**，主路径未在本地验证。
-> 可执行的等价验证是 standalone 产物（见上文验证状态表）；Docker 的未覆盖项在
-> [ADR-0005](docs/adr/0005-async-execution-boundary.md) 中逐条列出。
+> ✅ **主路径已于 2026-10-21 实测通过**（Windows 11 + WSL2 + Docker Desktop 29.9.1）：
+> `compose build`（产出 app 309 MB + migrator）→ `up -d postgres redis` 等 healthy →
+> `run --rm migrate` **退出码 0、6 个迁移全部应用** → `--profile app up -d app` →
+> `/api/health` 返回 200 且 `db.ok=true`，库内 21 张表 + `vector 0.8.7`。
+> 逐条命令、判定标准与踩坑记录见 [docs/ops/repo-and-deploy.md](docs/ops/repo-and-deploy.md)。
+>
+> 仍未验证的是**真实模型链路**（无 Key，全程 Mock）与**生产反代/TLS 场景**
+> （只在本机 3000 端口直连测过，未经过 Nginx/Caddy）。
 
 备选路径：
 
