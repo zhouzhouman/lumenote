@@ -175,6 +175,10 @@ function protectionPayload(opts) {
       // 明确禁止破坏性操作
       allow_force_pushes: false,
       allow_deletions: false,
+      // 推送白名单（只有组织仓库才有意义）。
+      // ⚠️ 必须显式传 null：个人账号仓库调这个接口时，漏掉该字段会返回
+      //    422 Invalid request. "restrictions" wasn't supplied.
+      restrictions: null,
       // 管理员也受限：false 表示不强制管理员遵守 —— 保留一个应急出口。
       // 想要「管理员也不能绕过」就改成 true（但那时你自己也推不进去了）。
       enforce_admins: false,
@@ -210,7 +214,9 @@ async function loadSodium() {
   const candidates = [
     'libsodium-wrappers',
     // 本机 WorkBuddy 托管的 node 依赖目录（不想给项目加 devDependency，
-    // 因为 pnpm-lock 变化会让 CI 的 --frozen-lockfile 直接失败）
+    // 因为 pnpm-lock 变化会让 CI 的 --frozen-lockfile 直接失败）。
+    // 显式装在一个独立目录里：`npm i libsodium-wrappers --prefix <dir>`
+    'C:/Users/qwert/.workbuddy/binaries/node/libsodium/node_modules/libsodium-wrappers',
     'C:/Users/qwert/.workbuddy/binaries/node/workspace/node_modules/libsodium-wrappers',
   ];
   // 让 NODE_PATH 也能生效
