@@ -34,6 +34,15 @@ updates:
         patterns:
           - 'vitest'
           - '@vitest/*'
+    ignore:
+      # vitest 5 不是一次普通升级：它要求 vite ^6.4 || ^7，会连带把
+      # vite 5→7、@vitejs/plugin-react 4→5、@vitest/coverage-v8 2→5 一起拽上去，
+      # 还要改 tests/integration/global-setup.ts 的 GlobalSetupContext 签名。
+      # 迁移清单见 issue #16；在完成之前屏蔽 major，避免 PR 反复开又反复关。
+      - dependency-name: 'vitest'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@vitest/*'
+        update-types: ['version-update:semver-major']
 
   # GitHub Actions 本身也要跟进，供应链风险不可忽视
   - package-ecosystem: github-actions
