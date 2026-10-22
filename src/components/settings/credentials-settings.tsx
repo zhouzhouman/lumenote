@@ -336,7 +336,7 @@ export function CredentialsSettings() {
           )}
 
           {showForm && (
-            <form onSubmit={save} className="space-y-4 rounded-md border bg-muted/20 p-4">
+            <form onSubmit={save} autoComplete="off" className="space-y-4 rounded-md border bg-muted/20 p-4">
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="cred-provider">模型服务</Label>
@@ -366,6 +366,7 @@ export function CredentialsSettings() {
                   <Label htmlFor="cred-label">名称</Label>
                   <Input
                     id="cred-label"
+                    autoComplete="off"
                     value={form.label}
                     onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
                     placeholder={currentProvider?.label ?? '我的 Key'}
@@ -380,6 +381,7 @@ export function CredentialsSettings() {
                       <Input
                         id="cred-model"
                         list="cred-model-options"
+                        autoComplete="off"
                         value={form.model}
                         onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
                         placeholder={currentProvider.defaultModel}
@@ -393,6 +395,7 @@ export function CredentialsSettings() {
                   ) : (
                     <Input
                       id="cred-model"
+                      autoComplete="off"
                       value={form.model}
                       onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
                       placeholder="例如 gpt-4o-mini"
@@ -409,6 +412,7 @@ export function CredentialsSettings() {
                     <>
                       <Input
                         id="cred-baseurl"
+                        autoComplete="off"
                         value={form.baseUrl}
                         onChange={(e) => setForm((f) => ({ ...f, baseUrl: e.target.value }))}
                         placeholder={currentProvider?.baseUrl || 'https://your-gateway.example.com/v1'}
@@ -438,8 +442,25 @@ export function CredentialsSettings() {
                 </Label>
                 <Input
                   id="cred-key"
+                  name="lumenote-credential-key"
                   type="password"
-                  autoComplete="off"
+                  /*
+                   * 关掉浏览器/密码管理器的自动装填。
+                   *
+                   * `autoComplete="off"` 对 password 字段无效 —— Chrome 会忽略它，
+                   * 照样弹「已保存的密码」并把值填进来。正确写法是 `new-password`：
+                   * 它明确告诉浏览器「这是要新建的密码，不要拿旧值填」。
+                   *
+                   * data-* 是几家密码管理器的专用开关（1Password / LastPass / Bitwarden），
+                   * 它们不认标准的 autocomplete。
+                   */
+                  autoComplete="new-password"
+                  data-lpignore="true"
+                  data-1p-ignore="true"
+                  data-bwignore="true"
+                  spellCheck={false}
+                  autoCorrect="off"
+                  autoCapitalize="off"
                   value={form.apiKey}
                   onChange={(e) => setForm((f) => ({ ...f, apiKey: e.target.value }))}
                   placeholder={form.id ? '••••••••（不修改）' : 'sk-…'}
