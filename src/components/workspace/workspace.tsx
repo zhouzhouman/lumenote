@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from 'react';
 import { apiPost, apiGet, ApiRequestError } from '@/lib/api-client';
+import { checkUrlInput, URL_INPUT_HINTS } from '@/lib/input/url';
 import { subscribeTaskStream } from '@/lib/sse-client';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/input';
@@ -278,8 +279,8 @@ export function Workspace() {
    * 为什么前端先挡一道：链接写错了，后端要等服务端抓取失败才报错，
    * 用户白等十几秒才看到「请输入有效的链接」。格式问题本地判断最便宜也最快。
    */
-  const urlLooksInvalid =
-    mode === 'url' && content.trim().length >= 10 && !/^https?:\/\/\S+$/i.test(content.trim());
+  const urlCheck = mode === 'url' ? checkUrlInput(content) : null;
+  const urlLooksInvalid = mode === 'url' && content.trim().length >= 10 && urlCheck?.ok === false;
 
   const canSubmitFinal = canSubmit && !tooLong && !urlLooksInvalid;
 
@@ -346,6 +347,24 @@ export function Workspace() {
               className="min-h-[220px] font-mono text-[13px]"
               disabled={submitting}
             />
+            {/*
+              「网页链接」模式的格式说明。
+              刻意常驻而不是等报错才提示：链接抓取要等服务端发起请求才知道失败，
+              用户白等十几秒才看到「格式不对」是最差的体验。把可用格式先摆出来，
+              用户一次就能填对。
+            */}
+            {mode === 'url' && (
+              <div className="space-y-0.5 rounded-md bg-muted/60 px-3 py-2">
+                {URL_INPUT_HINTS.map((line, i) => (
+                  <p key={line} className="text-xs leading-5 text-muted-foreground">
+                    {i === 0 && (
+                      <span className="font-medium text-foreground">可用格式　</span>
+                    )}
+                    {line}
+                  </p>
+                ))}
+              </div>
+            )}
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span>{charCount.toLocaleString()} 字</span>
               {tooLong && (
@@ -354,9 +373,7 @@ export function Workspace() {
                 </span>
               )}
               {urlLooksInvalid && (
-                <span className="text-destructive">
-                  链接需以 http:// 或 https:// 开头，且不能含空格
-                </span>
+                <span className="text-destructive">{urlCheck?.reason ?? '链接格式不正确'}</span>
               )}
             </div>
           </div>
