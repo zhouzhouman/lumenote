@@ -106,8 +106,19 @@ export async function POST(req: Request) {
 
     return ok({
       sent: true,
+      /*
+       * 关键区分：`sent` 是「码已生成」，`delivered` 是「邮件真的出去了」。
+       *
+       * 之前只回 sent:true + 「请查收邮件」，在 console 通道 + 生产环境下
+       * 等于对用户说假话 —— 他的邮箱里永远不会有这封信（实测：容器日志里
+       * 躺着验证码，用户却在等邮件）。内部部署场景必须把话说清楚。
+       */
+      delivered: result.delivered,
       expiresInSec: Math.round((result.expiresAt.getTime() - Date.now()) / 1000),
-      message: '验证码已发送，请查收邮件',
+      message: result.delivered
+        ? '验证码已发送，请查收邮件'
+        : '验证码已生成，但本站未配置邮件通道（MAIL_TRANSPORT=console），邮件没有真正发出：' +
+          '请查看服务端日志（docker compose logs app），或让管理员配置 resend。',
       // 仅 console 通道 + 非生产环境会带上它（mailer 层已把关）
       ...(result.devCode ? { devCode: result.devCode, transport: result.transport } : {}),
     });

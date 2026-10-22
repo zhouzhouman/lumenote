@@ -39,7 +39,14 @@ const RESEND_COOLDOWN_MS = 60_000; // 同邮箱 60 秒内不可重复发送
 const MAX_SENDS_PER_HOUR = 5;
 
 export type SendCodeOutcome =
-  | { ok: true; expiresAt: Date; devCode?: string; transport: SendMailResult['transport'] }
+  | {
+      ok: true;
+      expiresAt: Date;
+      devCode?: string;
+      transport: SendMailResult['transport'];
+      /** 邮件是否真的送达（console 通道为 false） */
+      delivered: boolean;
+    }
   | { ok: false; code: 'TOO_SOON' | 'TOO_MANY' | 'MAIL_FAILED'; message: string; retryAfterSec?: number };
 
 /**
@@ -144,7 +151,13 @@ export async function sendVerificationCode(
     };
   }
 
-  return { ok: true, expiresAt, devCode: mail.devCode, transport: mail.transport };
+  return {
+    ok: true,
+    expiresAt,
+    devCode: mail.devCode,
+    transport: mail.transport,
+    delivered: mail.delivered,
+  };
 }
 
 export type VerifyOutcome =

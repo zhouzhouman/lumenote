@@ -592,6 +592,17 @@ docker compose run --rm migrate   # 重跑也必须是 0（迁移幂等）
 curl -s localhost:3000/api/health # 200 且 "db":{"ok":true}
 ```
 
+> 📮 **注册收不到验证码？先看这里。**
+> 默认 `MAIL_TRANSPORT=console`（`docker-compose.yml` 的缺省值）**不会真发信** ——
+> 验证码只写进容器日志：`docker compose logs app --tail 50 | grep 验证码`。
+> 要真发信必须配 `MAIL_TRANSPORT=resend` + `RESEND_API_KEY` + **在 Resend 验证过的发件域名**
+> （`MAIL_FROM` 的域名没验证，Resend 会返回 403，接口报 502）；`smtp` 通道尚未接入。
+> 接口现在会返回 `delivered` 字段区分「码已生成」与「邮件已投递」，不再用一句
+> 「验证码已发送，请查收邮件」把没发信说成发了。
+>
+> ⚠️ 另外：`docker compose` 只读 **`.env`**，不读 `.env.local`。两个文件的 `AUTH_SECRET`
+> 一旦不一致，`AUTH_SECRET` 换过就会导致已保存的 BYOK 密钥全部解不开（见已知限制 §8）。
+
 必需的环境变量（通过 `.env` / shell / 平台 Secret 注入，镜像内不含 `.env`）：
 
 | 变量 | 说明 |

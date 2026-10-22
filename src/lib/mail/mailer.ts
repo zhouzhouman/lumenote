@@ -33,6 +33,15 @@ export interface SendMailInput {
 export interface SendMailResult {
   ok: boolean;
   transport: MailTransport;
+  /**
+   * 邮件是否**真的**发出去了。
+   *
+   * 为什么不能只看 ok：`console` 通道会「成功」返回（内容打到日志里），
+   * 但一封邮件都没发。调用方若把 ok 当成「已送达」，就会对着一个
+   * 没配邮件通道的部署说「验证码已发送，请查收邮件」——用户永远等不到。
+   * 这个字段就是用来区分「发信成功」与「只是记了个日志」的。
+   */
+  delivered: boolean;
   /** 仅 console 通道且非生产环境返回；调用方可据此在页面上提示 */
   devCode?: string;
   error?: string;
@@ -79,7 +88,7 @@ export async function sendMail(input: SendMailInput, devCode?: string): Promise<
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.error(`[mailer] 通过 ${transport} 发送失败：`, message);
-    return { ok: false, transport, error: message };
+    return { ok: false, transport, delivered: false, error: message };
   }
 }
 
@@ -103,7 +112,8 @@ function sendViaConsole(input: SendMailInput, devCode?: string): SendMailResult 
     ].join('\n'),
   );
 
-  return { ok: true, transport: 'console', devCode: assertNotProductionLeak(devCode) };
+  // console 通道：日志里有，邮箱里没有
+  return { ok: true, transport: 'console', delivered: false, devCode: assertNotProductionLeak(devCode) };
 }
 
 /** Resend：直接调 HTTP API，不引 SDK（少一个依赖，行为也更透明） */
@@ -117,6 +127,7 @@ async function sendViaResend(
     return {
       ok: false,
       transport: 'resend',
+      delivered: false,
       error: '未配置 RESEND_API_KEY（MAIL_TRANSPORT=resend 时必须提供）',
     };
   }
@@ -142,11 +153,12 @@ async function sendViaResend(
     return {
       ok: false,
       transport: 'resend',
+      delivered: false,
       error: `Resend 返回 ${res.status}：${body.slice(0, 200)}`,
     };
   }
 
-  return { ok: true, transport: 'resend', devCode: assertNotProductionLeak(devCode) };
+  return { ok: true, transport: 'resend', delivered: true, devCode: assertNotProductionLeak(devCode) };
 }
 
 /**
@@ -168,6 +180,7 @@ async function sendViaSmtp(
   return {
     ok: false,
     transport: 'smtp',
+    delivered: false,
     error:
       'SMTP 通道尚未接入。请安装 nodemailer 并在 src/lib/mail/mailer.ts 的 sendViaSmtp 中实现，' +
       '或改用 MAIL_TRANSPORT=resend / console。',
