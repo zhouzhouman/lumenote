@@ -111,6 +111,21 @@ psql -U postgres -c "CREATE DATABASE lumenote_test OWNER lumenote;"
   用 `PGHOME` / `PGDATA` / `PG*` 告诉 `scripts/dev.mjs`（见 [docs/demo-script.md](docs/demo-script.md) §5）；
 - 数据库地址必须与 `.env.local` 的 `DATABASE_URL` / `DIRECT_URL` 一致。
 
+**让 `pnpm dev` 自动拉起本地/便携版实例**（它探测到数据库没在跑就会自己启动）：
+
+```powershell
+# ⚠️ PGHOME 必须指向「含 pgsql/bin（或 bin）与 pgdata（或 data）」的目录
+$env:PGHOME = 'C:\path\to\postgresql'
+pnpm dev
+```
+
+> **`scripts/dev.mjs` 不读 `.env.local`**，它只看进程环境变量 —— 所以 PGHOME 写在
+> `.env.local` 里是无效的。要么每次 `$env:PGHOME=...`，要么用 `setx PGHOME "..."`
+> 写进用户环境变量（需重开终端生效）。
+>
+> 不设 PGHOME 且 Docker 不可用时，它会在探测阶段明确报错退出，**不会假装数据库可用**：
+> `未设置 PGHOME，检测到 docker —— 回退到 docker compose …` → `docker compose up -d postgres 执行失败`。
+
 登录演示账号后即可体验全部能力；Mock 模式的输出顶部会明确标注
 「这是 **Mock 模式**输出，未调用真实模型」——不伪装成真实结果。
 
