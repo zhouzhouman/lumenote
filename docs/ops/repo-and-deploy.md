@@ -252,10 +252,10 @@ curl -s localhost:3000/api/health                        # 6. 必须 200 且 db.
 | `docker compose config`（含 `--profile app`） | exit 0，4 个 service 全部正确渲染 |
 | `docker compose --profile app build` | 两个镜像产出：`lumenote-app:local`、`lumenote-migrator:local`，约 2 分钟 |
 | `docker compose up -d postgres redis` | 两个容器 `healthy`；`pg_available_extensions` 里有 `vector 0.8.7` |
-| `docker compose run --rm migrate` | **exit 0**，迁移全部应用（当前 7 条） |
+| `docker compose run --rm migrate` | **exit 0**，迁移全部应用（当前 8 条） |
 | `docker compose --profile app up -d app` | `healthy` |
 | `curl /api/health` | **HTTP 200**，`{"status":"ok","db":{"ok":true,"latencyMs":8}}` |
-| `select count(*) from information_schema.tables` | 22 张表（含 `Batch`）；`pg_extension` 里有 `vector 0.8.7` |
+| `select count(*) from information_schema.tables` | 23 张表（含 `Batch` 与 `AuditLog`）；`pg_extension` 里有 `vector 0.8.7` |
 
 `/api/health` 返回 200 就同时证明了「进程活着」和「数据库可用」——
 该接口只有在 `db.ok` 时才是 200。

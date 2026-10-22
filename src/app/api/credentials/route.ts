@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { handleError, ok, fail } from '@/lib/api';
-import { requireUserId } from '@/lib/auth/authz';
+import { requireActor, requireUserId } from '@/lib/auth/authz';
+import { recordAudit, auditContextFrom } from '@/lib/audit/log';
 import { env } from '@/lib/env';
 import {
   PROVIDERS,
@@ -108,7 +109,8 @@ export async function GET() {
 /** POST：新增凭证 */
 export async function POST(req: Request) {
   try {
-    const userId = await requireUserId();
+    const actor = await requireActor();
+    const userId = actor.userId;
     if (credentialsDisabled()) {
       return fail('FORBIDDEN', '本站未开放「自带 API Key」功能', 403);
     }
@@ -172,6 +174,22 @@ export async function POST(req: Request) {
     });
 
     invalidateCredentialCache(created.id);
+
+    /*
+     * 凭证变更是审计里最该有的一条：它决定「谁的额度在被用」。
+     * meta 只记 provider / model / label —— 密钥本体绝不进审计
+     * （recordAudit 里还有一层键名黑名单兜底）。
+     */
+    await recordAudit({
+      userId: actor.userId,
+      actorEmail: actor.email,
+      action: 'credential.create',
+      targetType: 'credential',
+      targetId: created.id,
+      meta: { provider, model: created.model, label: created.label },
+      context: auditContextFrom(req),
+    });
+
     return ok(created, { status: 201 });
   } catch (e) {
     return handleError(e);
@@ -181,7 +199,8 @@ export async function POST(req: Request) {
 /** PATCH：更新凭证（改名称/模型/地址/密钥，或切换启用状态） */
 export async function PATCH(req: Request) {
   try {
-    const userId = await requireUserId();
+    const actor = await requireActor();
+    const userId = actor.userId;
     if (credentialsDisabled()) {
       return fail('FORBIDDEN', '本站未开放「自带 API Key」功能', 403);
     }
@@ -243,6 +262,20 @@ export async function PATCH(req: Request) {
     // 配置变了，必须让缓存失效（缓存键是 id，内容却已经不同）
     invalidateCredentialCache(id);
 
+    /*
+     * 改 key 比删 key 更值得留痕：删了只是不能用了，改了可能是「把额度
+     * 指到别人的通道」。meta 只记「改了哪些字段名」，不记值。
+     */
+    await recordAudit({
+      userId: actor.userId,
+      actorEmail: actor.email,
+      action: 'credential.update',
+      targetType: 'credential',
+      targetId: id,
+      meta: { fields: Object.keys(body).sort(), model: updated.model },
+      context: auditContextFrom(req),
+    });
+
     return ok(updated);
   } catch (e) {
     return handleError(e);
@@ -252,7 +285,8 @@ export async function PATCH(req: Request) {
 /** DELETE：删除凭证 */
 export async function DELETE(req: Request) {
   try {
-    const userId = await requireUserId();
+    const actor = await requireActor();
+    const userId = actor.userId;
     if (credentialsDisabled()) {
       return fail('FORBIDDEN', '本站未开放「自带 API Key」功能', 403);
     }
@@ -265,6 +299,18 @@ export async function DELETE(req: Request) {
     if (result.count === 0) return fail('NOT_FOUND', '凭证不存在', 404);
 
     invalidateCredentialCache(id);
+
+    await recordAudit({
+      userId: actor.userId,
+      actorEmail: actor.email,
+      action: 'credential.delete',
+      targetType: 'credential',
+      targetId: id,
+      // 只记 id，不记被删凭证的 provider/model —— 删除后这些值已不可查，
+      // 想追溯「删的是哪条」可以对着更早的 credential.create 记录看
+      context: auditContextFrom(req),
+    });
+
     return ok({ ok: true });
   } catch (e) {
     return handleError(e);

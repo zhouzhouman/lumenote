@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { handleError, ok, fail } from '@/lib/api';
-import { requireUserId } from '@/lib/auth/authz';
+import { requireActor } from '@/lib/auth/authz';
+import { recordAudit, auditContextFrom } from '@/lib/audit/log';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -18,7 +19,8 @@ export const dynamic = 'force-dynamic';
  */
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const userId = await requireUserId();
+    const actor = await requireActor();
+    const userId = actor.userId;
     const { id } = await params;
 
     const batch = await prisma.batch.findFirst({
@@ -52,6 +54,15 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
           data: { cancelRequested: true, status: 'canceled', finishedAt: new Date() },
         }),
       ]);
+      await recordAudit({
+        userId: actor.userId,
+        actorEmail: actor.email,
+        action: 'batch.cancel',
+        targetType: 'batch',
+        targetId: batch.id,
+        meta: { previousStatus: 'queued', stoppedBeforeStart: true },
+        context: auditContextFrom(_req),
+      });
       return ok({ batchId: batch.id, cancelRequested: true, status: 'canceled' });
     }
 
@@ -63,6 +74,17 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     await prisma.batch.update({
       where: { id: batch.id },
       data: { cancelRequested: true },
+    });
+
+    await recordAudit({
+      userId: actor.userId,
+      actorEmail: actor.email,
+      action: 'batch.cancel',
+      targetType: 'batch',
+      targetId: batch.id,
+      // 取消只置位、不打断当前条 —— 审计里要体现「这是合作式取消」
+      meta: { previousStatus: batch.status, cooperative: true },
+      context: auditContextFrom(_req),
     });
 
     return ok({ batchId: batch.id, cancelRequested: true });

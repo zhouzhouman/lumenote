@@ -31,6 +31,15 @@ model User {
   name         String?
   // free | pro（pro 为后续商业化预留，本项目不实现支付）
   plan         String   @default("free")
+  /**
+   * 角色：member | auditor。
+   *
+   * ⚠️ 这**不是** RBAC，只是一个「能不能看全员审计日志」的开关。
+   * 真正的权限模型（org / 成员 / 角色 / 资源级授权）是另一条产品线；
+   * 在只有内网部署、账号由管理员创建的前提下，一个读权限位就够用了。
+   * 别在这里继续堆权限位 —— 那会变成一套没有边界检查的半成品。
+   */
+  role         String   @default("member")
   // 免费用户每日任务配额（次），由 UsageLog 聚合消耗
   dailyQuota   Int      @default(20)
   /**
@@ -55,6 +64,7 @@ model User {
   batches    Batch[]
   credentials ApiCredential[]
   securityEvents SecurityEvent[]
+  auditLogs     AuditLog[]
   /** 评测框架（阶段 4） */
   evalDatasets      EvalDataset[]
   evalRuns          EvalRun[]
@@ -405,6 +415,69 @@ model GlossaryTerm {
 
   @@unique([userId, source, domain])
   @@index([userId, domain])
+}
+
+// ============================================================
+// 审计日志（合规用途）
+// ============================================================
+//
+// 与 SecurityEvent 的分工：
+//   SecurityEvent = 「谁试图登录/注册」（认证侧，含失败尝试）
+//   AuditLog      = 「谁对业务数据做了什么」（批次创建、导出、凭证变更、分享）
+//
+// 两条硬要求，决定了下面几个字段的写法：
+//
+// 1. **用户被删除后日志必须留存**。
+//    `userId` 可空 + `onDelete: SetNull`，并且把 `actorEmail` 快照下来 ——
+//    否则删掉一个账号，他做过的所有操作就从审计里消失了，
+//    而这恰恰是出事时最需要查的部分。
+//
+// 2. **日志不允许被业务代码改写**。
+//    本仓库不为它提供 update / delete 接口；Prisma 层也没有软删字段。
+//    真正的不可篡改需要数据库层保证（独立账号只给 INSERT 权限、
+//    或写入 WORM 存储），应用层的「没写删改接口」只是第一道。
+
+model AuditLog {
+  id String @id @default(cuid())
+
+  /** 操作者。置空是因为用户被删除后日志要留下，不代表「不知道是谁」 */
+  userId String?
+  /** 操作者邮箱**快照**：用户改名或删除后，仍能说清是谁做的 */
+  actorEmail String
+
+  /**
+   * 动作。取值见 src/lib/audit/log.ts 的 AuditAction 联合类型：
+   * batch.create | batch.cancel | batch.export |
+   * credential.create | credential.delete | share.create | share.revoke
+   */
+  action String
+  /** 目标对象类型：batch | task | credential | share */
+  targetType String
+  targetId   String?
+
+  /** success | denied | failed —— 「被拒绝」也要留痕，否则看不出越权尝试 */
+  outcome String @default("success")
+
+  ip        String?
+  userAgent String?
+
+  /**
+   * 结构化细节：材料数、导出格式、预算、模型、成本…
+   *
+   * ⚠️ 绝不写入正文、密钥、验证码。`recordAudit()` 里有一层键名黑名单兜底，
+   * 但调用方仍要自觉 —— 兜底只能拦住明显的字段名。
+   */
+  meta Json?
+
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([action, createdAt(sort: Desc)])
+  @@index([targetType, targetId])
+  // 审计员按时间翻全量日志的主查询路径
+  @@index([createdAt(sort: Desc)])
 }
 
 // ============================================================
