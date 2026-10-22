@@ -41,7 +41,7 @@ Lumenote 的每条结果都能回答三个问题：
 | 端到端冒烟 | `pnpm smoke` | Mock 模式 **28 断言**全部通过（登录→建任务→SSE→幂等重放）；脚本**强制** `MOCK_LLM=true` 并清空三家厂商 Key，永不产生真实费用 | ✅ 已运行 |
 | 评测报告 | `MOCK_LLM=true pnpm eval:report` | Mock 模式生成 [docs/eval-report.md](docs/eval-report.md) | ✅ 已运行（**不代表真实模型质量**） |
 | standalone 产物 | `verify-standalone.mjs` | 按镜像布局 `node server.js`，**20/20** 断言，`/api/health` 200 且 `db.ok=true` | ✅ 已运行 |
-| Docker 构建/编排 | `docker compose build` / `run --rm migrate` / `up -d app` | 镜像 `lumenote-app:local` **309 MB**，不含 dev 工具链（`vite`/`vitest`/`eslint`/`typescript` 均不存在），仅 6 个被 Next 追踪的源文件（80 KB）；**6 个迁移全部应用**；`/api/health` 200 `db.ok=true`；库内 21 表 + `vector 0.8.7` | ✅ 已运行（WSL2 + Docker Desktop 实测，详见 [docs/ops/repo-and-deploy.md](docs/ops/repo-and-deploy.md)） |
+| Docker 构建/编排 | `docker compose build` / `run --rm migrate` / `up -d app` | 镜像 `lumenote-app:local` **309 MB**，不含 dev 工具链（`vite`/`vitest`/`eslint`/`typescript` 均不存在），仅 6 个被 Next 追踪的源文件（80 KB）；**7 个迁移全部应用**；`/api/health` 200 `db.ok=true`；库内 22 表 + `vector 0.8.7` | ✅ 已运行（WSL2 + Docker Desktop 实测，详见 [docs/ops/repo-and-deploy.md](docs/ops/repo-and-deploy.md)） |
 | 真实 Redis 限流 | `pnpm test:redis` | **12 项检查全过** | ✅ 已运行（三处：本机 Redis 3.2、容器 `redis:7`、CI service） |
 | GitHub Actions | `CI` / `Docker Publish` | 5 个 job 全绿（verify / integration / coverage / secret-scan / rate-limit-redis）；`dependency-review` 仅在 PR 上运行 | ✅ 已运行（[Actions](https://github.com/zhouzhouman/lumenote/actions)），镜像已推送 GHCR |
 | 真实模型评测 | `pnpm eval:report`（MOCK_LLM=false） | — | ❌ 未运行（无 Key、明确零费用；judge 未校准） |
@@ -235,6 +235,30 @@ GET  /api/followup?taskId=...&whole=1            → 整条对话链
 - **成本保护与任务创建一致**：追问同样检查每日配额、并发上限与按用户限流；
   BYOK 判定以父任务的 `credentialId` 快照为准（用自己 key 的追问不占站点配额）；
   ⚠️ 但追问目前**没有幂等键**，双击/网络重试会重复建子任务并重复计费（见已知限制）。
+
+### 批次处理（面向内部文档流水线）
+
+一批材料一起交、串行跑、逐条留痕、可导出 —— 面向「合同/标书/研报批量处理」这类
+**内部**场景：材料不方便传到外部 SaaS，但确实需要批量 + 可审计 + 花费可预测。
+
+- **输入**：一个文本框，多份之间用单独一行 `---` 分隔；某一整块是链接时按网页读取
+  （走同一套 SSRF 防护）。刻意不做文件上传 —— PDF/DOCX 解析是另一个量级的工作，
+  而内部材料的实际来源往往是邮件/IM/Word 里复制出来的文本；
+- **串行执行**：批次内按 `batchOrder` 一条一条跑。串行不是偷懒：
+  「同用户同时 1 个进行中任务」本来就是既有约束，而且**预算是「花到上限就停」**，
+  并发跑会让闸门在起跑瞬间失效；
+- **预算闸门**：设了上限后，每条**发请求之前**先估算下一条会不会超。
+  超了就把剩余条目置为 `canceled` + `SKIPPED_BUDGET` —— 它们**没有花钱**，
+  与「失败」严格区分（把跳过算进失败会让失败率失真，用户会去排查不存在的模型问题）。
+  ⚠️ 预算是**软上限**：实测预算 ¥0.0025 时最终花了 ¥0.0029，
+  偏差来自「预估 vs 真实」的最后一条，不会级联超支；
+- **留痕**：每条记录都带模型、Prompt 版本、输入/输出 token、成本、耗时、是否降级、
+  错误码。导出 Markdown/CSV 时会一并带上 —— 否则导出文件和「随手用网页版 AI 跑一遍」
+  就没有区别，内部审计时无法自证；
+- **单条失败不拖垮整批**：某份链接打不开时，该条落一条 `failed` 记录（带原因），
+  其余继续跑。失败也要有记录，否则详情页会少一行，用户会以为系统在丢数据；
+- **取消是合作式**：只置 `cancelRequested`，执行器在**条目边界**停下，
+  不强杀正在跑的那条（强杀会留下半截输出与不完整的计量）。
 
 ### 只读分享 / 术语表 / 登录活动
 
@@ -499,6 +523,16 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
     的内容，而历史任务只存 `promptVersionId` —— 严格意义上的「历史 Prompt 不可变」需要
     在文案变化时新建版本而不是 update。当前按开发期约定处理（演示库可重建）；
     生产若要求审计级不可变，应改为 seed 只插入新版本、不改旧行。
+14. **批次（v1）的四条边界**：
+    - **没有组织/角色模型**：所谓「团队」靠「内网部署 + 每人一个账号 + 批次归属到人」实现。
+      真正的多租户（org / 成员 / 角色 / 团队配额）是另一条产品线，硬塞会把 `Batch`
+      做成半成品；
+    - **不支持文件上传**：只吃文本与链接。PDF/DOCX 需要引入解析依赖与二进制处理，未做；
+    - **串行意味着慢**：20 份材料 × 每份几十秒 = 十几分钟。要提速的正确做法是
+      「分片 + 每片独立预算」，而不是简单加并发（加并发会让预算闸门失效）；
+    - **取消不打断正在跑的那一条**，且**批次没有 reaper**：与 §1 同源 ——
+      `after()` 不是队列，进程崩溃会留下一个 `running` 的批次。当前靠「取消接口在
+      `queued` 时直接收尾」兜住一部分，彻底修法同 §1（要真队列）。
 
 ---
 
@@ -537,8 +571,8 @@ curl -s localhost:3000/api/health # 200 且 "db":{"ok":true}
 
 > ✅ **主路径已于 2026-10-21 实测通过**（Windows 11 + WSL2 + Docker Desktop 29.9.1）：
 > `compose build`（产出 app 309 MB + migrator）→ `up -d postgres redis` 等 healthy →
-> `run --rm migrate` **退出码 0、6 个迁移全部应用** → `--profile app up -d app` →
-> `/api/health` 返回 200 且 `db.ok=true`，库内 21 张表 + `vector 0.8.7`。
+> `run --rm migrate` **退出码 0、迁移全部应用**（当前 7 条）→ `--profile app up -d app` →
+> `/api/health` 返回 200 且 `db.ok=true`，库内 22 张表（含批次表）+ `vector 0.8.7`。
 > 逐条命令、判定标准与踩坑记录见 [docs/ops/repo-and-deploy.md](docs/ops/repo-and-deploy.md)。
 >
 > 仍未验证的是**真实模型链路**（无 Key，全程 Mock）与**生产反代/TLS 场景**

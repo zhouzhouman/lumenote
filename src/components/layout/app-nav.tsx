@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button';
  */
 const NAV_ITEMS = [
   { href: '/workspace', label: '工作台', hint: '摘要 / 翻译 / 润色' },
+  { href: '/batches', label: '批次', hint: '批量处理与导出' },
   { href: '/history', label: '历史', hint: '结果、对比与分享' },
   { href: '/glossary', label: '术语表', hint: '统一专有名词译法' },
   { href: '/usage', label: '成本', hint: '用量与账单' },
