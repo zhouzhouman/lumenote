@@ -52,6 +52,7 @@ model User {
   tasks      Task[]
   shareLinks ShareLink[]
   usageLogs  UsageLog[]
+  batches    Batch[]
   credentials ApiCredential[]
   securityEvents SecurityEvent[]
   /** 评测框架（阶段 4） */
@@ -316,6 +317,12 @@ model Task {
   // 多轮追问：指向根任务
   parentTaskId String?
 
+  // 所属批次（普通单篇任务为 null）。批次内按 batchOrder 升序**串行**执行 ——
+  // 串行不是偷懒：并发上限本来就是「同用户同时 1 个」，
+  // 而且预算是「花到上限就停」，并发跑会让预算闸门形同虚设
+  batchId    String?
+  batchOrder Int?
+
   // ---- 可观测性 ----
   errorCode    String?
   errorMessage String?
@@ -334,6 +341,7 @@ model Task {
   promptVersion PromptVersion    @relation(fields: [promptVersionId], references: [id])
   parent        Task?            @relation("Thread", fields: [parentTaskId], references: [id], onDelete: SetNull)
   children      Task[]           @relation("Thread")
+  batch         Batch?           @relation(fields: [batchId], references: [id], onDelete: SetNull)
   versions      TaskVersion[]
   shareLink     ShareLink?
   usageLog      UsageLog?
@@ -353,6 +361,8 @@ model Task {
   // 防越权：单任务查询时同时命中 userId
   @@index([userId, id])
   @@index([parentTaskId])
+  // 批次执行器按 (batchId, batchOrder) 顺序取待执行条目
+  @@index([batchId, batchOrder])
 }
 
 // 写作助手的版本快照，diff 的数据基础
@@ -395,6 +405,61 @@ model GlossaryTerm {
 
   @@unique([userId, source, domain])
   @@index([userId, domain])
+}
+
+// ============================================================
+// 批次（团队内部的文档流水线）
+// ============================================================
+//
+// 为什么要单独一张表，而不是「给 Task 加个 tag 然后按 tag 查」：
+//  1. 批次有自己的**生命周期与预算**：整批能不能开始、跑到一半超预算要停、
+//     剩下的条目要标成「因预算跳过」而不是「失败」——这些状态不属于任何单条任务
+//  2. 批次要**可留痕**：谁在什么时候处理了哪 N 份材料、用了哪个 Prompt 版本、
+//     花了多少钱、有几条走了降级。散在 Task 上用聚合查询拼，查询成本与解释成本都高
+//  3. 单条任务可以不属于任何批次（普通单篇摘要），所以 Task.batchId 必须可空
+//
+// ⚠️ 刻意**不做**组织/角色模型：v1 的「团队」语义靠「部署在内网 + 每人一个账号 +
+// 批次归属到人」实现。真正的多租户（org/team/role/成员配额）是另一条产品线，
+// 硬塞进来会让这张表变成半成品。
+
+model Batch {
+  id     String @id @default(cuid())
+  userId String
+  name   String
+  // summarize | translate | write
+  type   String
+  // queued | running | succeeded | partial | failed | canceled
+  status String @default("queued")
+
+  // 计数冗余存储：列表页要显示「12/20 成功」，每次 count(*) 扫子任务不划算
+  total     Int @default(0)
+  succeeded Int @default(0)
+  failed    Int @default(0)
+  // 因预算/额度/取消而**没有执行**的条目数。与 failed 严格区分：
+  // failed = 试过了但失败；skipped = 根本没发请求，不花钱
+  skipped   Int @default(0)
+
+  // 整批的统一参数（摘要风格、要点数、目标读者…）
+  // Task.params 存的是渲染 prompt 用的最终参数，这里存的是「用户下单时的选择」
+  params Json
+
+  // 预算上限（人民币）。null = 不限制
+  budgetCny Float?
+  // 已发生成本（美元，与 UsageLog.estimatedCost 同口径）
+  // 不在批次上按人民币累加：汇率一变历史数据就自相矛盾
+  costUsd   Float @default(0)
+
+  // 合作式取消：置位后执行器在**条目边界**检查，不强杀正在进行的那一条
+  cancelRequested Boolean @default(false)
+
+  createdAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks Task[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
 }
 
 // ============================================================

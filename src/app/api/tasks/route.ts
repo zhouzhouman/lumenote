@@ -5,8 +5,7 @@ import { prisma } from '@/lib/db';
 import { handleError, ok, fail, parseLimit } from '@/lib/api';
 import { requireUserId } from '@/lib/auth/authz';
 import { runSummarizePipeline } from '@/lib/pipeline/runner';
-import { extractText } from '@/lib/pipeline/extract/text';
-import { estimateTokens } from '@/lib/llm/mock';
+import { createTaskRecord } from '@/lib/tasks/create';
 import { LLMError } from '@/lib/llm/types';
 import { env } from '@/lib/env';
 import {
@@ -14,12 +13,9 @@ import {
   normalizeIdempotencyKey,
   assertConcurrencyWithinLimit,
   checkDailyQuota,
-  isUniqueViolation,
 } from '@/lib/idempotency';
 import { rateLimitByUser } from '@/lib/rate-limit';
 import { loadActiveCredential } from '@/lib/llm/credentials';
-import { taskTypeDef } from '@/lib/tasks/types';
-import { buildGlossaryPrompt } from '@/lib/tasks/glossary';
 import type { CursorPage, TaskSummary } from '@/types/api';
 
 /**
@@ -221,47 +217,6 @@ async function createTask(  userId: string,
     }
   }
 
-  // 提取与清洗正文
-  const extracted = await extractText({ type: body.inputType, content: body.content });
-
-  /**
-   * 取该任务类型对应的模板。
-   *
-   * ⚠️ slug 必须按 type 解析，不能写死。写死 sys:summarize.long 的后果是：
-   * 翻译任务用摘要的提示词去跑 —— 模型会「总结」而不是「翻译」，
-   * 界面还显示成功，用户拿到的是一份看起来正常但完全不对的结果。
-   */
-  const taskTypeDefResolved = taskTypeDef(body.type);
-
-  const template = await prisma.promptTemplate.findFirst({
-    where: { slug: taskTypeDefResolved.slug, isActive: true },
-    include: {
-      versions: { where: { status: 'active' }, orderBy: { version: 'desc' }, take: 1 },
-    },
-  });
-
-  if (!template || template.versions.length === 0) {
-    throw new LLMError(
-      `Prompt 模板「${taskTypeDefResolved.templateName}」未初始化，请先执行 pnpm prisma:seed`,
-      'TEMPLATE_MISSING',
-      false,
-      500,
-    );
-  }
-
-  const version = template.versions[0]!;
-
-  /**
-   * 翻译任务：把用户的术语表拼成 prompt 片段。
-   *
-   * 为什么在服务端拼而不是让前端传：
-   * 术语表是用户账号下的数据，前端传的话就必须信任客户端提交的内容，
-   * 而且用户改了术语表之后已提交的任务不会跟着变 —— 那样「术语一致性」就没保证了。
-   * 这里在创建任务时读一次并快照进 params，保证这个任务永远用当时那份术语表。
-   */
-  const glossaryPrompt =
-    body.type === 'translate' ? await buildGlossaryPrompt(userId, body.params.targetLang) : '';
-
   /**
    * 模型名的记录。
    *
@@ -275,58 +230,25 @@ async function createTask(  userId: string,
       ? (body.model ?? e.DEFAULT_MODEL)
       : e.DEFAULT_MODEL;
 
-  const title =
-    body.title?.trim() ||
-    extracted.meta.title?.slice(0, 80) ||
-    (body.inputType === 'url'
-      ? extracted.meta.sourceHost ?? '链接摘要'
-      : `${extracted.content.slice(0, 30)}…`);
-
-  try {
-    return await prisma.task.create({
-      data: {
-        userId,
-        type: body.type,
-        title,
-        status: 'queued',
-        inputType: body.inputType,
-        inputRef: body.inputType === 'url' ? body.content.trim() : null,
-        inputContent: extracted.content,
-        inputMeta: {
-          charCount: extracted.meta.charCount,
-          tokenCount: estimateTokens(extracted.content),
-          sourceHost: extracted.meta.sourceHost ?? null,
-          extractedTitle: extracted.meta.title ?? null,
-          truncated: extracted.meta.truncated ?? false,
-          // 记「这次用了谁的凭证」，方便用户核对成本来源。
-          // 只记 id 与展示名，不含任何密钥信息。
-          credentialId: activeCredential?.id ?? null,
-          credentialLabel: activeCredential?.label ?? null,
-        } as never,
-        templateId: template.id,
-        promptVersionId: version.id,
-        idempotencyKey,
-        // credentialId 一并写进 params：管线据此还原「当时用的是哪条凭证」，
-        // 避免用户后来换了 key 导致重跑结果与历史不一致
-        params: {
-          ...body.params,
-          model,
-          // 术语表在**创建任务时**快照，而不是执行时现读。
-          // 理由：用户之后可能改术语表，但这条任务的 Prompt 指纹必须保持不变 ——
-          // 否则「可追溯」就无从谈起（同一条记录重跑会得到不同结果）。
-          ...(glossaryPrompt ? { glossary: glossaryPrompt } : {}),
-          ...(activeCredential ? { credentialId: activeCredential.id } : {}),
-        } as never,
-      },
-    });
-  } catch (e) {
-    // 并发下两个请求同时通过了幂等查重，靠唯一索引兜底
-    if (isUniqueViolation(e)) {
-      const existing = await prisma.task.findFirst({ where: { userId, idempotencyKey } });
-      if (existing) return existing;
-    }
-    throw e;
-  }
+  /*
+   * 正文提取 → 模板/版本解析 → 术语表快照 → 落库，全部交给共享函数。
+   * 批次（POST /api/batches）走的是同一个函数：这条链路一旦复制成两份，
+   * 迟早会出现「翻译任务用了摘要模板」这种界面正常、结果全错的事故。
+   */
+  return createTaskRecord({
+    userId,
+    type: body.type,
+    inputType: body.inputType,
+    content: body.content,
+    params: body.params as Record<string, unknown>,
+    model,
+    credential: activeCredential
+      ? { id: activeCredential.id, label: activeCredential.label }
+      : null,
+    title: body.title,
+    idempotencyKey,
+    batchId: null,
+  });
 }
 
 // ============================================================
