@@ -45,6 +45,34 @@ export async function requireUserId(): Promise<string> {
   return userId;
 }
 
+/** 需要「谁」而不只是「谁 id」时用（审计要写操作者邮箱快照） */
+export interface AuthActor {
+  userId: string;
+  email: string;
+  /** member | auditor —— 只用于「能否查看全员审计日志」这一个判断 */
+  role: string;
+}
+
+/**
+ * 取当前操作者的 id + 邮箱 + 角色。
+ *
+ * 为什么不直接在审计里只存 userId：用户被删除后 `AuditLog.userId` 会被置空
+ * （外键 SET NULL），届时「这条日志是谁产生的」就只能靠邮箱快照。
+ * 所以写审计时**必须**把邮箱一起落下来。
+ */
+export async function requireActor(): Promise<AuthActor> {
+  const userId = await requireUserId();
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true, role: true },
+  });
+  if (!user) {
+    // 账号已被删但 cookie 还没过期：当作未登录处理
+    throw new LLMError('账号不存在，请重新登录', 'UNAUTHENTICATED', false, 401);
+  }
+  return { userId, email: user.email, role: user.role };
+}
+
 /**
  * 按 id 取任务，并校验归属。
  *

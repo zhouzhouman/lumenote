@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import crypto from 'node:crypto';
 import { prisma } from '@/lib/db';
 import { fail, handleError, ok } from '@/lib/api';
-import { requireUserId, authzTask } from '@/lib/auth/authz';
+import { requireUserId, requireActor, authzTask } from '@/lib/auth/authz';
+import { recordAudit, auditContextFrom } from '@/lib/audit/log';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -36,7 +37,8 @@ function generateShareToken(): string {
 /** POST /api/share —— 为某个任务创建（或取回）分享链接 */
 export async function POST(req: Request) {
   try {
-    const userId = await requireUserId();
+    const actor = await requireActor();
+    const userId = actor.userId;
     const body = (await req.json()) as { taskId?: unknown; expiresInDays?: unknown };
 
     const taskId = typeof body.taskId === 'string' ? body.taskId : '';
@@ -92,6 +94,21 @@ export async function POST(req: Request) {
       },
     });
 
+    /*
+     * 分享链接 = 数据出站口。合规审计里这一条比「谁跑了摘要」更重要：
+     * 一旦有内容外泄，第一个要回答的问题就是「谁在什么时候开了分享」。
+     * meta 只记过期时间与「是否复用」，**不记 token**（token 等于访问凭据）。
+     */
+    await recordAudit({
+      userId: actor.userId,
+      actorEmail: actor.email,
+      action: 'share.create',
+      targetType: 'share',
+      targetId: taskId,
+      meta: { expiresAt: created.expiresAt, reused: false },
+      context: auditContextFrom(req),
+    });
+
     return ok({ token: created.token, expiresAt: created.expiresAt, reused: false });
   } catch (e) {
     return handleError(e);
@@ -101,7 +118,8 @@ export async function POST(req: Request) {
 /** DELETE /api/share?taskId=... —— 撤销分享链接 */
 export async function DELETE(req: Request) {
   try {
-    const userId = await requireUserId();
+    const actor = await requireActor();
+    const userId = actor.userId;
     const url = new URL(req.url);
     const taskId = url.searchParams.get('taskId');
     if (!taskId) return fail('VALIDATION_ERROR', '缺少 taskId', 422);
@@ -115,6 +133,15 @@ export async function DELETE(req: Request) {
     });
 
     if (result.count === 0) return fail('NOT_FOUND', '该任务没有分享链接', 404);
+
+    await recordAudit({
+      userId: actor.userId,
+      actorEmail: actor.email,
+      action: 'share.revoke',
+      targetType: 'share',
+      targetId: taskId,
+      context: auditContextFrom(req),
+    });
 
     return ok({ ok: true });
   } catch (e) {

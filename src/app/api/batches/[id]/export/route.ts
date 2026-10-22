@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { handleError, fail } from '@/lib/api';
-import { requireUserId } from '@/lib/auth/authz';
+import { requireActor } from '@/lib/auth/authz';
+import { recordAudit, auditContextFrom } from '@/lib/audit/log';
 import { usdToCny } from '@/lib/llm/pricing';
 
 export const runtime = 'nodejs';
@@ -22,7 +23,8 @@ export const dynamic = 'force-dynamic';
  */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const userId = await requireUserId();
+    const actor = await requireActor();
+    const userId = actor.userId;
     const { id } = await params;
     const format = new URL(req.url).searchParams.get('format') === 'csv' ? 'csv' : 'md';
 
@@ -72,6 +74,20 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
       format === 'csv'
         ? buildCsv(tasks)
         : buildMarkdown(batch, tasks, usdToCny(batch.costUsd));
+
+    /*
+     * 导出的审计要**在返回文件之前**写：这个动作本身就等于「数据出站」，
+     * 事后补记会漏掉「导出失败了但文件已经生成」的边界。
+     */
+    await recordAudit({
+      userId: actor.userId,
+      actorEmail: actor.email,
+      action: 'batch.export',
+      targetType: 'batch',
+      targetId: batch.id,
+      meta: { format, itemCount: tasks.length },
+      context: auditContextFrom(req),
+    });
 
     return new Response(body, {
       status: 200,

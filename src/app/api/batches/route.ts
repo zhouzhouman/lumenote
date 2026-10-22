@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { after } from 'next/server';
 import { prisma } from '@/lib/db';
 import { ok, fail, handleError, parseLimit } from '@/lib/api';
-import { requireUserId } from '@/lib/auth/authz';
+import { requireActor, requireUserId } from '@/lib/auth/authz';
+import { recordAudit, auditContextFrom } from '@/lib/audit/log';
 import { env } from '@/lib/env';
 import { rateLimitByUser } from '@/lib/rate-limit';
 import { loadActiveCredential } from '@/lib/llm/credentials';
@@ -37,7 +38,8 @@ const CreateBatchSchema = z.object({
 
 export async function POST(req: Request) {
   try {
-    const userId = await requireUserId();
+    const actor = await requireActor();
+    const userId = actor.userId;
     const e = env();
 
     // 建批次比建单篇任务「重」得多（一次可能落 20 条记录），限流更严
@@ -198,6 +200,27 @@ export async function POST(req: Request) {
       } catch (err) {
         console.error(`[batch:${batch.id}] 执行器异常：`, err);
       }
+    });
+
+    /*
+     * 审计：批次创建是「一批材料被提交处理」这个动作的唯一凭据。
+     * 记份数、失败数、预算与模型 —— 这四项决定了「这次跑了多少钱、能不能复现」。
+     */
+    await recordAudit({
+      userId: actor.userId,
+      actorEmail: actor.email,
+      action: 'batch.create',
+      targetType: 'batch',
+      targetId: batch.id,
+      meta: {
+        itemCount: parsed.items.length,
+        created,
+        failedOnCreate,
+        budgetCny: body.budgetCny ?? null,
+        model,
+        type: body.type,
+      },
+      context: auditContextFrom(req),
     });
 
     return ok({

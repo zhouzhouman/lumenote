@@ -20,6 +20,7 @@ const NAV_ITEMS = [
   { href: '/history', label: '历史', hint: '结果、对比与分享' },
   { href: '/glossary', label: '术语表', hint: '统一专有名词译法' },
   { href: '/usage', label: '成本', hint: '用量与账单' },
+  { href: '/audit', label: '操作记录', hint: '谁做了什么，可导出' },
   { href: '/settings', label: '模型设置', hint: '配置自己的 API Key' },
   { href: '/security', label: '登录活动', hint: '设备与安全事件' },
 ] as const;

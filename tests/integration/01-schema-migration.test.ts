@@ -4,7 +4,7 @@
  * globalSetup 已经把 public schema 整体 drop 再 `prisma migrate deploy` 过一遍，
  * 所以这里断言的是「那次从零迁移的可观测结果」——不是重新造数据库，
  * 而是确认它确实按预期落地了：
- *   - `_prisma_migrations` 有且只有 7 条成功记录（当前仓库的迁移数）
+ *   - `_prisma_migrations` 有且只有 8 条成功记录（当前仓库的迁移数）
  *   - 所有迁移都 finished、没有 rolled back
  *   - 核心表真实存在（不是「代码里定义了」而是「库里查得到」）
  *   - 应用能连上这个库（/api/health 的 db.ok）
@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { db } from './helpers/db';
 import { baseUrl } from './helpers/env';
 
-/** 当前仓库 prisma/migrations 下的 7 个迁移（按应用顺序） */
+/** 当前仓库 prisma/migrations 下的 8 个迁移（按应用顺序） */
 const EXPECTED_MIGRATIONS = [
   '20261012052437_init',
   '20261014090000_add_api_credential',
@@ -26,6 +26,8 @@ const EXPECTED_MIGRATIONS = [
   '20261017054435_judge_calibration_add_question',
   // 批次：团队内部文档流水线（Batch 表 + Task.batchId/batchOrder）
   '20261022035000_add_batch',
+  // 审计：AuditLog 表 + User.role
+  '20261022060000_add_audit_log',
 ] as const;
 
 /** 核心业务表：缺任何一张都说明迁移链断了 */
@@ -34,6 +36,7 @@ const CORE_TABLES = [
   'Session',
   'LoginAttempt',
   'SecurityEvent',
+  'AuditLog',
   'EmailVerificationCode',
   'PromptTemplate',
   'PromptVersion',
@@ -55,7 +58,7 @@ interface MigrationRow {
 }
 
 describe('空库迁移（globalSetup 的 DROP + migrate deploy 结果）', () => {
-  it('`_prisma_migrations` 记录了 7 条已成功应用的迁移', async () => {
+  it('`_prisma_migrations` 记录了 8 条已成功应用的迁移', async () => {
     const rows = await db().$queryRawUnsafe<MigrationRow[]>(
       'SELECT migration_name, finished_at, rolled_back_at, logs FROM "_prisma_migrations" ORDER BY started_at ASC',
     );

@@ -41,7 +41,7 @@ Lumenote 的每条结果都能回答三个问题：
 | 端到端冒烟 | `pnpm smoke` | Mock 模式 **28 断言**全部通过（登录→建任务→SSE→幂等重放）；脚本**强制** `MOCK_LLM=true` 并清空三家厂商 Key，永不产生真实费用 | ✅ 已运行 |
 | 评测报告 | `MOCK_LLM=true pnpm eval:report` | Mock 模式生成 [docs/eval-report.md](docs/eval-report.md) | ✅ 已运行（**不代表真实模型质量**） |
 | standalone 产物 | `verify-standalone.mjs` | 按镜像布局 `node server.js`，**20/20** 断言，`/api/health` 200 且 `db.ok=true` | ✅ 已运行 |
-| Docker 构建/编排 | `docker compose build` / `run --rm migrate` / `up -d app` | 镜像 `lumenote-app:local` **309 MB**，不含 dev 工具链（`vite`/`vitest`/`eslint`/`typescript` 均不存在），仅 6 个被 Next 追踪的源文件（80 KB）；**7 个迁移全部应用**；`/api/health` 200 `db.ok=true`；库内 22 表 + `vector 0.8.7` | ✅ 已运行（WSL2 + Docker Desktop 实测，详见 [docs/ops/repo-and-deploy.md](docs/ops/repo-and-deploy.md)） |
+| Docker 构建/编排 | `docker compose build` / `run --rm migrate` / `up -d app` | 镜像 `lumenote-app:local` **309 MB**，不含 dev 工具链（`vite`/`vitest`/`eslint`/`typescript` 均不存在），仅 6 个被 Next 追踪的源文件（80 KB）；**8 个迁移全部应用**；`/api/health` 200 `db.ok=true`；库内 23 表 + `vector 0.8.7` | ✅ 已运行（WSL2 + Docker Desktop 实测，详见 [docs/ops/repo-and-deploy.md](docs/ops/repo-and-deploy.md)） |
 | 真实 Redis 限流 | `pnpm test:redis` | **12 项检查全过** | ✅ 已运行（三处：本机 Redis 3.2、容器 `redis:7`、CI service） |
 | GitHub Actions | `CI` / `Docker Publish` | 5 个 job 全绿（verify / integration / coverage / secret-scan / rate-limit-redis）；`dependency-review` 仅在 PR 上运行 | ✅ 已运行（[Actions](https://github.com/zhouzhouman/lumenote/actions)），镜像已推送 GHCR |
 | 真实模型评测 | `pnpm eval:report`（MOCK_LLM=false） | — | ❌ 未运行（无 Key、明确零费用；judge 未校准） |
@@ -259,6 +259,34 @@ GET  /api/followup?taskId=...&whole=1            → 整条对话链
   其余继续跑。失败也要有记录，否则详情页会少一行，用户会以为系统在丢数据；
 - **取消是合作式**：只置 `cancelRequested`，执行器在**条目边界**停下，
   不强杀正在跑的那条（强杀会留下半截输出与不完整的计量）。
+
+### 审计留痕（内部合规）
+
+「谁在什么时候对哪些数据做了什么」—— 回答不了这个问题的系统，进不了合规流程。
+
+与 `SecurityEvent` 的分工：SecurityEvent 管认证侧（谁试图登录、失败几次），
+AuditLog 管业务侧（谁跑了批次、导出了什么、改了凭证、开了分享）。
+
+记录的动作：`batch.create` / `batch.cancel` / `batch.export` /
+`credential.create` / `credential.update` / `credential.delete` /
+`share.create` / `share.revoke` / `audit.export`。
+
+三个**数据层**决定（不是应用层约定）：
+
+- **`userId` 可空 + `actorEmail` 快照**，外键 `ON DELETE SET NULL`。
+  删掉一个账号时，他做过的操作不能跟着消失 —— 出事时最先要查的恰恰是
+  「离职/被删账号做过什么」。真正的那个人靠邮箱快照记住；
+- **没有 `updatedAt`、没有 `deletedAt`**，系统也**不提供任何修改/删除审计的接口**。
+  审计的价值全在「谁都改不了」，一旦给了入口，哪怕只给管理员，证明力就打折；
+- **`meta` 写入前过一层键名黑名单**（password / secret / token / apiKey /
+  authorization / cookie / 验证码…），递归剔除 + 字符串截断。
+  导出会发给外部审计方，密钥跟着导出文件流出的错误在 code review 里几乎看不出来。
+
+可见性：`User.role = 'auditor'` 能看到全员日志，其他人只看自己的。
+⚠️ 这**不是 RBAC** —— 只有一个读权限位，凭据见 `schema.prisma` 里的说明。
+
+导出 CSV / JSON，单次上限 5000 条，且**导出动作本身也会被记一条**：
+只记「谁看了业务操作」却不记「谁把这些记录拷走了」，是自相矛盾的。
 
 ### 只读分享 / 术语表 / 登录活动
 
@@ -533,6 +561,15 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
     - **取消不打断正在跑的那一条**，且**批次没有 reaper**：与 §1 同源 ——
       `after()` 不是队列，进程崩溃会留下一个 `running` 的批次。当前靠「取消接口在
       `queued` 时直接收尾」兜住一部分，彻底修法同 §1（要真队列）。
+15. **审计是「尽力而为」，不是审计级的不可篡改**：
+    - **写入失败不阻塞业务**（与 `recordSecurityEvent` 一致）：用户要的是批次建成功，
+      不是「审计写不进去所以失败」。代价是审计可能缺一条，只留 error 日志。
+      真正合规要求「写失败即拒」（两阶段提交），届时要把 `recordAudit` 纳入业务事务；
+    - **不可篡改只做到应用层**：没有 update/delete 接口、没有软删字段，但拥有数据库
+      写权限的人仍可直接改行。彻底的保证需要独立数据库账号只授 `INSERT`，或写入 WORM 存储；
+    - **没有保留期与归档策略**：日志只增不删，长期运行会持续膨胀。
+      内部合规通常要求「保留 N 年 + 到期归档」，这块尚未实现；
+    - **没有组织级隔离**：只有 `auditor` 一个读权限位，做不了「A 部门看不到 B 部门」。
 
 ---
 
@@ -571,8 +608,8 @@ curl -s localhost:3000/api/health # 200 且 "db":{"ok":true}
 
 > ✅ **主路径已于 2026-10-21 实测通过**（Windows 11 + WSL2 + Docker Desktop 29.9.1）：
 > `compose build`（产出 app 309 MB + migrator）→ `up -d postgres redis` 等 healthy →
-> `run --rm migrate` **退出码 0、迁移全部应用**（当前 7 条）→ `--profile app up -d app` →
-> `/api/health` 返回 200 且 `db.ok=true`，库内 22 张表（含批次表）+ `vector 0.8.7`。
+> `run --rm migrate` **退出码 0、迁移全部应用**（当前 8 条）→ `--profile app up -d app` →
+> `/api/health` 返回 200 且 `db.ok=true`，库内 23 张表（含批次表与审计表）+ `vector 0.8.7`。
 > 逐条命令、判定标准与踩坑记录见 [docs/ops/repo-and-deploy.md](docs/ops/repo-and-deploy.md)。
 >
 > 仍未验证的是**真实模型链路**（无 Key，全程 Mock）与**生产反代/TLS 场景**
