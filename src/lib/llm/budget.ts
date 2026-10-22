@@ -134,6 +134,41 @@ function cutAtCharBoundary(text: string): string {
 }
 
 /**
+ * 从「拼好的 prompt」里把**用户正文**捞回来。
+ *
+ * 为什么降级时不能直接用 prompt：prompt 是给模型看的完整输入，除了正文还包含
+ * 两层脚手架 ——
+ *
+ *   1. `wrapUntrusted()` 在外层套的 `<document>…</document>`
+ *   2. 模板渲染出来的参数头，如 `# 目标读者 普通读者` / `# 需要的要点数量 5`
+ *
+ * 实测踩过：降级分支直接把 prompt 丢给 heuristicSummary，而它在正文较短时会
+ * 「原样返回」，于是用户看到的结果是这样的（把内部提示词当成了摘要）：
+ *
+ *   <document> # 目标读者 普通读者 # 需要的要点数量 5 <document> 最美的风景…
+ *
+ * 这不只是难看：它把内部 prompt 结构暴露给了终端用户。
+ *
+ * 提取规则（保守，宁可少剥不可错剥）：
+ *   - 只取最后一个 `</document>` 之前的内容 —— 之后是调用方追加的指令
+ *   - 去掉所有 `<document>` / `</document>` 标签（可能嵌套两层）
+ *   - 丢掉形如 `# <参数名> <值>` 的参数头行
+ */
+export function extractSourceText(prompt: string): string {
+  const lastClose = prompt.lastIndexOf('</document>');
+  const body = lastClose >= 0 ? prompt.slice(0, lastClose) : prompt;
+
+  return body
+    .replace(/<\/?document>/gi, '')
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*#\s*(目标读者|需要的要点数量|摘要风格|目标长度|语气|输出语言)/.test(line))
+    .join('\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
  * 本地启发式摘要 —— 降级链的最后一档。
  *
  * 刻意做得很朴素：取开头 + 取含数字/标题的句子 + 结尾。
@@ -142,17 +177,72 @@ function cutAtCharBoundary(text: string): string {
  *
  * 诚实很重要：返回一个假装是 AI 摘要的粗糙结果，比返回错误更有害，
  * 因为用户会把它当成真的。
+ *
+ * ⚠️ 传入的 `text` 必须是**正文**，不是拼好的 prompt ——
+ * 用 `extractSourceText()` 先剥掉脚手架。
  */
-export function heuristicSummary(text: string, maxChars = 1200): { summary: string; degraded: true } {
+export function heuristicSummary(
+  text: string,
+  opts: { maxChars?: number; maxPoints?: number } = {},
+): { summary: string; degraded: true } {
+  const maxChars = opts.maxChars ?? 1200;
+  const maxPoints = opts.maxPoints ?? 0;
   const cleaned = text.replace(/\s+/g, ' ').trim();
-  if (cleaned.length <= maxChars) {
-    return { summary: cleaned, degraded: true };
+
+  const note = '> ⚠️ **降级结果**：所有 AI 通道当前不可用，以下内容由本地规则提取，未经模型处理，可能不准确。';
+
+  if (!cleaned) {
+    return { summary: `${note}\n\n（正文为空，无法提取任何内容。）`, degraded: true };
   }
 
-  const sentences = cleaned.split(/(?<=[.!?。！？])/).filter(Boolean);
+  /**
+   * 用户选了「要点式 N 条」，降级结果也必须是 N 条编号要点。
+   *
+   * 否则用户明明选了要点式，却拿到一大段原文，会直接判定「功能坏了」——
+   * 而降级标记藏在角标里，他不会去看。这是形式上的承诺，不能只兑现一半。
+   */
+  if (maxPoints > 0) {
+    const sentences = splitSentences(cleaned);
+    const picked = pickTopSentences(sentences, maxChars, Math.min(maxPoints, sentences.length));
+    const lines = picked.map((s, i) => `${i + 1}. ${s}`);
+    return { summary: [note, '', ...lines].join('\n'), degraded: true };
+  }
 
-  // 打分：句子靠前、含数字、含关键词的权重更高
-  const keywords = extractKeywords(cleaned);
+  if (cleaned.length <= maxChars) {
+    return { summary: `${note}\n\n${cleaned}`, degraded: true };
+  }
+
+  const sentences = splitSentences(cleaned);
+  const picked: string[] = [];
+  let total = 0;
+  for (const s of pickTopSentences(sentences, maxChars, Number.POSITIVE_INFINITY)) {
+    if (total + s.length > maxChars) continue;
+    picked.push(s);
+    total += s.length;
+    if (total > maxChars * 0.9) break;
+  }
+
+  return {
+    summary: [note, '', ...picked].join('\n'),
+    degraded: true,
+  };
+}
+
+/** 按句末标点切句，保留标点；过滤空白句 */
+function splitSentences(text: string): string[] {
+  return text
+    .split(/(?<=[.!?。！？])/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 挑出信息量最高的若干句，并**恢复原文顺序**（乱序的要点读起来是断的）。
+ */
+function pickTopSentences(sentences: string[], maxChars: number, limit: number): string[] {
+  if (sentences.length === 0) return [];
+
+  const keywords = extractKeywords(sentences.join(' '));
   const scored = sentences.map((s, i) => {
     let score = (sentences.length - i) / sentences.length; // 位置权重
     if (/\d/.test(s)) score += 0.3;
@@ -163,23 +253,13 @@ export function heuristicSummary(text: string, maxChars = 1200): { summary: stri
   const picked: string[] = [];
   let total = 0;
   for (const { s } of scored.sort((a, b) => b.score - a.score)) {
+    if (picked.length >= limit) break;
     if (total + s.length > maxChars) continue;
-    picked.push(s.trim());
+    picked.push(s);
     total += s.length;
-    if (total > maxChars * 0.9) break;
   }
 
-  // 恢复原文顺序，读起来才连贯
-  const ordered = sentences.filter((s) => picked.includes(s.trim()));
-
-  return {
-    summary: [
-      '> ⚠️ **降级结果**：所有 AI 通道当前不可用，以下内容由本地规则提取，未经模型处理，可能不准确。',
-      '',
-      ...ordered,
-    ].join('\n'),
-    degraded: true,
-  };
+  return sentences.filter((s) => picked.includes(s));
 }
 
 function extractKeywords(text: string, topN = 8): string[] {

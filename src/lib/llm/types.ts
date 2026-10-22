@@ -98,6 +98,13 @@ export interface LLMRequest {
   reasoningEffort?: 'low' | 'high' | 'max';
   /** JSON 输出模式。⚠️ DeepSeek 仅 json_object，非 strict schema，详见 ADR-0003 */
   jsonMode?: boolean;
+  /**
+   * 期望的要点数量（缺省 / 0 = 段落式）。
+   *
+   * 只被**降级分支**使用：所有通道都不可用时，本地规则提取也要遵守用户选的
+   * 「要点式 N 条」，否则形式上的承诺只兑现一半（详见 budget.ts 的说明）。
+   */
+  pointCount?: number;
   tools?: LLMTool[];
   /** 输出预算：超出时调用方应降级而非直接失败 */
   budget?: { maxInputTokens: number; maxOutputTokens: number };

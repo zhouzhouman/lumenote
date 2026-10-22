@@ -143,6 +143,8 @@ async function runMapChunkCore(args: {
       system: ctx.renderedSystemPrompt,
       // ⚠️ wrapUntrusted：把正文包进 <document>，告诉模型这是数据不是指令
       prompt: `${wrapUntrusted(userPrompt)}\n${instructions}`,
+      // 降级时本地规则提取也要按本块分配的要点数出编号列表（见 budget.ts）
+      pointCount: budget.perChunkPoints,
       temperature: 0.3,
       maxTokens: budget.perChunkPoints * 45,
       thinking: 'disabled',
@@ -248,6 +250,8 @@ async function runReduceCore(args: {
       model: ctx.defaultModel,
       system: ctx.renderedSystemPrompt,
       prompt: `${wrapUntrusted(userPrompt)}\n${instructions}`,
+      // 降级时本地规则提取也要按用户选的要点数出编号列表（见 budget.ts）
+      pointCount: pointCount > 0 ? pointCount : undefined,
       // 采样参数按任务类型取：翻译要更确定（低温度），润色可以更灵活
       temperature: args.temperature ?? ctx.temperature,
       maxTokens: args.maxOutputTokens ?? ctx.maxOutputTokens,

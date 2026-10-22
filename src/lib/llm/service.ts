@@ -1,7 +1,7 @@
 import { buildFallbackChain, sanitizeRequest, type UserProviderConfig } from './registry';
 import { getBreaker } from './breaker';
 import { withRetry, DEFAULT_RETRY } from './retry';
-import { clampInput, heuristicSummary } from './budget';
+import { clampInput, extractSourceText, heuristicSummary } from './budget';
 import { LLMError, type LLMRequest, type LLMUsage } from './types';
 
 /**
@@ -193,7 +193,20 @@ export async function streamWithFallback(
   }
 
   // ---- 降级链全部失败：本地启发式 ----
-  const fallback = heuristicSummary(request.prompt);
+  /*
+   * ⚠️ 必须先把 prompt 里的**正文**捞出来再交给启发式。
+   *
+   * `request.prompt` 是给模型看的完整输入：外层有 `wrapUntrusted` 的
+   * `<document>` 包裹，里面还有模板渲染出的参数头（`# 目标读者 …`）。
+   * 直接把它当摘要返回，用户会看到内部提示词原样输出 —— 实测就是这样：
+   *
+   *   <document> # 目标读者 普通读者 # 需要的要点数量 5 <document> 最美的风景…
+   *
+   * 既难看，又把 prompt 结构泄漏给了终端用户。
+   */
+  const fallback = heuristicSummary(extractSourceText(request.prompt), {
+    maxPoints: request.pointCount ?? 0,
+  });
 
   const lastError = attempts[attempts.length - 1]?.error;
 
