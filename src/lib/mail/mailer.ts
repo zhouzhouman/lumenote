@@ -162,29 +162,160 @@ async function sendViaResend(
 }
 
 /**
- * SMTP 通道。
+ * SMTP 通道 —— 面向**内网部署**的真实发信。
  *
- * ⚠️ 这里刻意**不引入 nodemailer**：本项目只在发验证码时用到 SMTP，
- * 为此增加一个带多个传递依赖的库不划算。但完整实现 SMTP（含 STARTTLS、
- * 认证方式协商、MIME 编码）并不适合手写 —— 那是一块容易出安全问题的协议实现。
+ * 典型场景：公司内网有一台中继（Exchange / 企业邮箱 / postfix），
+ * 或者整个环境根本不连公网，只希望同一网段的人能收到验证码。
+ * 这两种情况都不该依赖 Resend（它需要出站 HTTPS 到 api.resend.com）。
  *
- * 因此当前选择是**显式不实现**：走 SMTP 时直接返回明确错误，
- * 让部署方知道要去装依赖并接上，而不是给一个「看起来能跑、实际发不出信」的实现。
- * 这符合本项目「宁可明确失败也不静默降级」的一贯取向。
+ * ## 为什么用 nodemailer 而不是手写
+ *
+ * SMTP 看起来只是「连上去发几行文本」，实际要处理：明文/STARTTLS/直连 TLS 协商、
+ * AUTH 机制选择（PLAIN/LOGIN/CRAM-MD5）、MIME 与中文编码、多行响应码、
+ * 超时与连接复用。手写出来的版本通常能跑通 happy path，然后在某个企业邮箱上
+ * 静默失败。协议实现引入成熟库是划算的。
+ *
+ * ## 配置形态（三选一）
+ *
+ *   1. 内网中继：SMTP_HOST + 端口（+ 账号）
+ *   2. 直投 MX：SMTP_DIRECT=true（需要出站 25 端口，通常只在内网同域可用）
+ *   3. 自签证书中继：额外 SMTP_REJECT_UNAUTHORIZED=false
  */
+
+export interface SmtpConfigInput {
+  host?: string;
+  port?: number;
+  secure?: string;
+  user?: string;
+  pass?: string;
+  rejectUnauthorized?: boolean;
+  direct?: boolean;
+}
+
+export interface SmtpTransportOptions {
+  host?: string;
+  port: number;
+  secure: boolean;
+  direct: boolean;
+  tls: { rejectUnauthorized: boolean };
+  auth?: { user: string; pass: string };
+  /** 连接/握手/读写超时：配错地址时不该把请求吊死几十秒 */
+  connectionTimeout: number;
+  greetingTimeout: number;
+  socketTimeout: number;
+}
+
+export type SmtpConfigResult =
+  | { ok: true; options: SmtpTransportOptions }
+  | { ok: false; error: string };
+
+/**
+ * 由环境变量推出 nodemailer 的连接参数。
+ *
+ * 抽成纯函数是为了能单测：端口/加密/证书校验这些「配错就静默不可用」的
+ * 分支，靠人肉点一遍是测不全的。
+ */
+export function smtpTransportOptions(input: SmtpConfigInput): SmtpConfigResult {
+  const direct = input.direct === true;
+  const host = input.host?.trim() || undefined;
+
+  if (!direct && !host) {
+    return {
+      ok: false,
+      error:
+        'SMTP 通道缺少 SMTP_HOST。请填写内网中继地址（如 mail.intra.local:25），' +
+        '或设 SMTP_DIRECT=true 直投收件域 MX。',
+    };
+  }
+
+  // 账号与密码必须成对出现：只给用户名会让上游回 535，报错信息还看不出是配漏了
+  const user = input.user?.trim() || undefined;
+  const pass = input.pass ?? '';
+  if (user && !input.pass) {
+    return { ok: false, error: '配置了 SMTP_USER 但没有 SMTP_PASS（内网无认证中继请两个都留空）' };
+  }
+
+  // 端口与加密方式的约定：465 = 直连 TLS；25/587 = 明文连接后按需 STARTTLS
+  const explicitSecure =
+    input.secure === 'true' ? true : input.secure === 'false' ? false : undefined;
+  const port = input.port ?? (direct ? 25 : explicitSecure === false ? 587 : 587);
+  const secure = explicitSecure ?? port === 465;
+
+  return {
+    ok: true,
+    options: {
+      ...(host ? { host } : {}),
+      port,
+      secure,
+      direct,
+      tls: { rejectUnauthorized: input.rejectUnauthorized !== false },
+      ...(user ? { auth: { user, pass } } : {}),
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 20_000,
+    },
+  };
+}
+
 async function sendViaSmtp(
-  _from: string,
-  _input: SendMailInput,
+  from: string,
+  input: SendMailInput,
   devCode?: string,
 ): Promise<SendMailResult> {
-  return {
-    ok: false,
-    transport: 'smtp',
-    delivered: false,
-    error:
-      'SMTP 通道尚未接入。请安装 nodemailer 并在 src/lib/mail/mailer.ts 的 sendViaSmtp 中实现，' +
-      '或改用 MAIL_TRANSPORT=resend / console。',
-    // devCode 不透出：通道不可用时不该顺手把验证码给出去
-    ...(devCode ? {} : {}),
-  };
+  const e = env();
+  const config = smtpTransportOptions({
+    host: e.SMTP_HOST,
+    port: e.SMTP_PORT,
+    secure: e.SMTP_SECURE,
+    user: e.SMTP_USER,
+    pass: e.SMTP_PASS,
+    rejectUnauthorized: e.SMTP_REJECT_UNAUTHORIZED,
+    direct: e.SMTP_DIRECT,
+  });
+
+  if (!config.ok) {
+    return { ok: false, transport: 'smtp', delivered: false, error: config.error };
+  }
+
+  const sender = e.SMTP_FROM?.trim() || from;
+
+  try {
+    // 动态 import：只有真正走 SMTP 时才把 nodemailer 载入（console/resend 部署不需要它）
+    const nodemailer = await import('nodemailer');
+    const transporter = nodemailer.createTransport(config.options);
+
+    try {
+      await transporter.sendMail({
+        from: sender,
+        to: input.to,
+        subject: input.subject,
+        text: input.text,
+      });
+    } finally {
+      // 发送完主动关闭连接池：验证码是低频动作，留着连接只会占住上游的会话数
+      transporter.close?.();
+    }
+
+    return {
+      ok: true,
+      transport: 'smtp',
+      delivered: true,
+      devCode: assertNotProductionLeak(devCode),
+    };
+  } catch (err) {
+    /*
+     * 错误信息要能定位问题，但**不能带密码**。
+     * nodemailer 的报错包含 host/port/响应码，不含 auth 凭据，所以可以透出；
+     * 这里再做一次兜底替换，防止上游把 AUTH 行回显进错误里。
+     */
+    const raw = err instanceof Error ? err.message : String(err);
+    const safe = e.SMTP_PASS ? raw.split(e.SMTP_PASS).join('***') : raw;
+
+    return {
+      ok: false,
+      transport: 'smtp',
+      delivered: false,
+      error: `SMTP 发送失败（${config.options.direct ? '直投 MX' : `${config.options.host}:${config.options.port}`}）：${safe.slice(0, 300)}`,
+    };
+  }
 }
