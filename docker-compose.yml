@@ -159,11 +159,23 @@ services:
       FREE_DAILY_QUOTA: '${FREE_DAILY_QUOTA:-20}'
       MAX_CONCURRENT_TASKS_PER_USER: '${MAX_CONCURRENT_TASKS_PER_USER:-1}'
       # ---- 邮件（注册验证码）----
-      # console：不发信，验证码打到日志；生产环境代码硬性禁止把验证码回传客户端，
-      # 因此正式环境必须改用 resend（或 smtp，尚未接入）并把 RESEND_API_KEY 注入。
+      # console：不发信，验证码打到日志；生产环境代码硬性禁止把验证码回传客户端。
+      # 真发信两条路：公网 resend（需 RESEND_API_KEY + 验证过的发件域名），
+      # 或内网 smtp（指向同网段中继，或 SMTP_DIRECT=true 直投 MX）。
       MAIL_TRANSPORT: '${MAIL_TRANSPORT:-console}'
       MAIL_FROM: '${MAIL_FROM:-Lumenote <no-reply@lumenote.local>}'
       RESEND_API_KEY: '${RESEND_API_KEY:-}'
+      # ---- 内网 SMTP（MAIL_TRANSPORT=smtp 时生效）----
+      # ⚠️ 这里的每一项都要显式透传：compose 不会自动把宿主 .env 里的变量
+      # 塞进容器，漏一个就会出现「.env 里配了 SMTP_HOST，容器里却是空的」。
+      SMTP_HOST: '${SMTP_HOST:-}'
+      SMTP_PORT: '${SMTP_PORT:-}'
+      SMTP_SECURE: '${SMTP_SECURE:-}'
+      SMTP_USER: '${SMTP_USER:-}'
+      SMTP_PASS: '${SMTP_PASS:-}'
+      SMTP_FROM: '${SMTP_FROM:-}'
+      SMTP_REJECT_UNAUTHORIZED: '${SMTP_REJECT_UNAUTHORIZED:-}'
+      SMTP_DIRECT: '${SMTP_DIRECT:-}'
       # ---- 应用 ----
       NEXT_PUBLIC_APP_URL: '${NEXT_PUBLIC_APP_URL:-http://localhost:3000}'
     healthcheck:
