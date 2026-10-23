@@ -145,6 +145,21 @@ const serverSchema = z.object({
   MAIL_FROM: z.string().default('Lumenote <no-reply@lumenote.local>'),
   RESEND_API_KEY: z.string().optional(),
 
+  /**
+   * 注册时是否要求验证邮箱。
+   *
+   * **默认关闭**（因为这个项目的目标场景是内网部署，很多内网没有可用邮件通道，
+   * 强制验证会把所有新用户挡在门外）。
+   *
+   * 关闭后注册只需「账号 + 密码」—— 代价是**无法确认邮箱真实性**：
+   * 人可以填别人的邮箱。所以此时唯一的防线是 IP 限流与密码强度，
+   * 这一点写进 README 已知限制，不假装它和「验证过」等价。
+   */
+  REQUIRE_EMAIL_VERIFICATION: z
+    .string()
+    .optional()
+    .transform((v) => v === 'true'),
+
   // ---------- 内网 SMTP（MAIL_TRANSPORT=smtp）----------
   /**
    * 中继地址。填了就通过这台 SMTP 服务器投递（企业邮箱 / Exchange / postfix）。

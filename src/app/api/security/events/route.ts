@@ -2,6 +2,7 @@ import { ok, handleError } from '@/lib/api';
 import { requireUserId } from '@/lib/auth/authz';
 import { listSecurityEvents, failureCount } from '@/lib/auth/security';
 import { prisma } from '@/lib/db';
+import { env } from '@/lib/env';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -83,6 +84,12 @@ export async function GET() {
     return ok({
       account: {
         emailVerified: user?.emailVerified ?? false,
+        /*
+         * 把「本站是否要求验证」一起告诉前端。
+         * 否则关闭验证的部署里，安全页会显示「邮箱未验证」，
+         * 用户会以为哪里出错了、到处找验证入口。
+         */
+        emailVerificationRequired: env().REQUIRE_EMAIL_VERIFICATION,
         createdAt: user?.createdAt.toISOString() ?? null,
         lastLoginAt: user?.lastLoginAt?.toISOString() ?? null,
         /** 当前锁定窗口内的失败次数，用于提示「你的账号正处于风险中」 */

@@ -162,6 +162,9 @@ services:
       # console：不发信，验证码打到日志；生产环境代码硬性禁止把验证码回传客户端。
       # 真发信两条路：公网 resend（需 RESEND_API_KEY + 验证过的发件域名），
       # 或内网 smtp（指向同网段中继，或 SMTP_DIRECT=true 直投 MX）。
+      # 是否要求注册时验证邮箱。默认 false：内网常常没有可用邮件通道，
+      # 强制验证会把新用户全挡在门外。开启前请确认上面的邮件通道真的能用。
+      REQUIRE_EMAIL_VERIFICATION: '${REQUIRE_EMAIL_VERIFICATION:-false}'
       MAIL_TRANSPORT: '${MAIL_TRANSPORT:-console}'
       MAIL_FROM: '${MAIL_FROM:-Lumenote <no-reply@lumenote.local>}'
       RESEND_API_KEY: '${RESEND_API_KEY:-}'

@@ -26,6 +26,8 @@ interface SessionItem {
 interface Payload {
   account: {
     emailVerified: boolean;
+    /** 本站是否要求邮箱验证；false 时「未验证」是正常状态，不是故障 */
+    emailVerificationRequired: boolean;
     createdAt: string | null;
     lastLoginAt: string | null;
     recentFailures: number;
@@ -163,7 +165,12 @@ export function SecurityActivity() {
         <CardHeader>
           <CardTitle className="text-base">账号状态</CardTitle>
           <CardDescription>
-            {data.account.emailVerified ? '邮箱已验证' : '邮箱未验证'} ·{' '}
+            {data.account.emailVerified
+              ? '邮箱已验证'
+              : data.account.emailVerificationRequired
+                ? '邮箱未验证'
+                : '邮箱未验证（本站未开启验证）'}{' '}
+            ·{' '}
             {data.account.createdAt
               ? `注册于 ${new Date(data.account.createdAt).toLocaleDateString('zh-CN')}`
               : '注册时间未知'}
