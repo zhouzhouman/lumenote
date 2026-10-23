@@ -11,6 +11,7 @@ import { signAccessToken, accessCookie, refreshCookie } from '@/lib/auth/jwt';
 import { createSession } from '@/lib/auth/session';
 import { rateLimitAuthByIp, clientIp } from '@/lib/rate-limit';
 import { verifyCode } from '@/lib/auth/verification';
+import { registrationVerificationDecision } from '@/lib/auth/verification-policy';
 import { recordSecurityEvent } from '@/lib/auth/security';
 import { env } from '@/lib/env';
 
@@ -23,17 +24,21 @@ const RegisterSchema = z.object({
   /**
    * 邮箱验证码。
    *
-   * ⚠️ 这是必填的。做成可选会留下一个后门：
-   * 攻击者只要不传这个字段就能绕过整个验证环节，
-   * 于是「加了验证码」只是看起来更安全了。
+   * 字段本身可选，但**要不要它是服务端按配置决定的**（REQUIRE_EMAIL_VERIFICATION）：
+   *  - 开启验证时：缺 code 直接拒绝。绝不能「前端不传就跳过」——
+   *    那等于给了一个绕过验证的后门
+   *  - 关闭验证时：字段被忽略（旧客户端照传也不会出错）
    */
-  code: z.string().trim().min(4, '请输入邮箱验证码').max(12, '验证码格式不正确'),
+  code: z.string().trim().min(4, '请输入邮箱验证码').max(12, '验证码格式不正确').optional(),
 });
 
 /**
  * 注册。
  *
- * 流程：IP 限流 → 校验参数 → 密码强度 → **校验邮箱验证码** → 建号 → 直接签发会话。
+ * 流程：IP 限流 → 校验参数 → 密码强度 →（可选）校验邮箱验证码 → 建号 → 直接签发会话。
+ *
+ * 「可选」是部署配置决定的，不是客户端决定的：`REQUIRE_EMAIL_VERIFICATION=false`
+ * 时只凭账号+密码注册（内网没有邮件通道的常见做法）。
  *
  * 为什么要「验证码通过就直接登录」而不是要求再登录一次：
  * 注册时用户刚刚证明了「邮箱是他的 + 密码是他设的」，再让他输一遍密码
@@ -72,14 +77,31 @@ export async function POST(req: Request) {
      * 但密码是纯本地计算（零成本），先做能省掉一次数据库往返，
      * 也让「密码太弱」这类最常见的失败尽早返回。
      */
-    const verdict = await verifyCode(email, 'register', body.code);
-    if (!verdict.ok) {
-      await recordSecurityEvent('verification_failed', {
-        subject: email,
-        context: { ip, userAgent },
-        meta: { reason: verdict.code },
-      });
-      return fail(verdict.code, verdict.message, 422, { code: verdict.message });
+    const requireVerification = env().REQUIRE_EMAIL_VERIFICATION;
+
+    /*
+     * 判定抽到 verification-policy.ts：这条规则一旦写错就是「验证形同虚设」，
+     * 值得单独测（见 tests/register-policy.test.ts）。
+     */
+    const decision = registrationVerificationDecision({
+      required: requireVerification,
+      code: body.code,
+    });
+
+    if (decision.action === 'reject') {
+      return fail('VERIFICATION_REQUIRED', decision.message, 422, { code: '请输入邮箱验证码' });
+    }
+
+    if (decision.action === 'verify') {
+      const verdict = await verifyCode(email, 'register', body.code!);
+      if (!verdict.ok) {
+        await recordSecurityEvent('verification_failed', {
+          subject: email,
+          context: { ip, userAgent },
+          meta: { reason: verdict.code },
+        });
+        return fail(verdict.code, verdict.message, 422, { code: verdict.message });
+      }
     }
 
     const passwordHash = await hashPassword(body.password);
@@ -90,8 +112,12 @@ export async function POST(req: Request) {
           email,
           passwordHash,
           name: body.name?.trim() || null,
-          // 走完验证码即视为邮箱已验证
-          emailVerified: true,
+          /*
+           * 只有真的验过码才算「已验证」。
+           * 关闭验证时如实写 false —— 安全页据此显示「邮箱未验证」，
+           * 而不是骗人写 true（用户会以为这个邮箱被确认过）。
+           */
+          emailVerified: requireVerification,
           lastLoginAt: new Date(),
           // 新用户的免费额度来自配置，而不是硬编码 —— 调整额度不该需要改代码发版
           dailyQuota: env().FREE_DAILY_QUOTA,

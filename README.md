@@ -142,7 +142,7 @@ pnpm dev
 - **数据**：Prisma 7 + PostgreSQL 16
 - **样式**：Tailwind CSS 3.4（CSS 变量驱动，支持暗色）
 - **模型接入**：AI SDK 7 + `@ai-sdk/openai-compatible`（DeepSeek 主 / OpenAI 备 / 本地 Mock）
-- **鉴权**：自建 JWT（access 15min + refresh 7 天轮换）+ bcrypt + 邮箱验证码
+- **鉴权**：自建 JWT（access 15min + refresh 7 天轮换）+ bcrypt；注册默认只要账号+密码，可选开启邮箱验证码（`REQUIRE_EMAIL_VERIFICATION=true`）
 - **限流**：store 抽象，`memory`（默认）/ `redis`（多实例共享）
 - **可观测性**：OpenTelemetry tracing（JSONL / OTLP exporter）+ 数据库指标聚合
 - **测试**：Vitest 2（32 文件 / 662 单测）+ 真实 Postgres 集成测试（8 文件 / 23 测试）+ Playwright 截图脚本
@@ -573,6 +573,13 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
     - **没有保留期与归档策略**：日志只增不删，长期运行会持续膨胀。
       内部合规通常要求「保留 N 年 + 到期归档」，这块尚未实现；
     - **没有组织级隔离**：只有 `auditor` 一个读权限位，做不了「A 部门看不到 B 部门」。
+16. **注册默认不验证邮箱**：`REQUIRE_EMAIL_VERIFICATION=false` 时只要账号+密码，
+    任何人都能用一个**不属于自己的邮箱**注册。这对内网自用可以接受（账号由管理员
+    口头分配、用户彼此认识），但绝不能当成「已确认邮箱」对外宣称。
+    关闭验证后仅有的防线是注册接口的 IP 限流（5 次/5 分钟）与密码强度校验；
+    公开部署务必开启验证并配好邮件通道。另外此时**没有找回密码能力**
+    （本来依赖邮件，尚未实现）——忘记密码只能由管理员改库。
+
 
 ---
 
@@ -595,8 +602,12 @@ docker compose run --rm migrate   # 重跑也必须是 0（迁移幂等）
 curl -s localhost:3000/api/health # 200 且 "db":{"ok":true}
 ```
 
-> 📮 **注册收不到验证码？先看这里。**
-> 默认 `MAIL_TRANSPORT=console`（`docker-compose.yml` 的缺省值）**不会真发信** ——
+> 📮 **下面这段只在「开启了邮箱验证」时才相关。**
+> 注册**默认不要求邮箱验证码**（`REQUIRE_EMAIL_VERIFICATION=false`）：账号+密码即可开通，
+> 内网部署不需要任何邮件通道。要改成需要验证，设 `REQUIRE_EMAIL_VERIFICATION=true`
+> 并确认邮件通道真的可用（否则新用户会被卡在注册页）。
+>
+> 开启了验证却收不到码？默认 `MAIL_TRANSPORT=console`（`docker-compose.yml` 的缺省值）**不会真发信** ——
 > 验证码只写进容器日志：`docker compose logs app --tail 50 | grep 验证码`。
 > 要真发信有两条路：**公网**用 `resend`（需要 `RESEND_API_KEY` + 在 Resend 验证过的发件域名，
 > 否则返回 403、接口报 502）；**内网**用 `smtp`（指向同网段的中继，或 `SMTP_DIRECT=true` 直投 MX），
@@ -613,6 +624,7 @@ curl -s localhost:3000/api/health # 200 且 "db":{"ok":true}
 |---|---|
 | `AUTH_SECRET` | **必需**，无默认值，缺失时 compose 直接报错；`openssl rand -base64 32` |
 | `POSTGRES_PASSWORD` | Postgres 密码（compose 内默认 `lumenote`，生产必须改） |
+| `REQUIRE_EMAIL_VERIFICATION` | 注册是否要求邮箱验证码。**默认 `false`**（账号+密码即可注册）；开启前必须先配好可用邮件通道 |
 | `MAIL_TRANSPORT` | `console`（默认，不发信）/ `resend`（公网）/ `smtp`（内网中继或直投 MX）。`console` 在生产环境**硬性禁止**回传验证码，也**不会真的发信** |
 | `RESEND_API_KEY` | `resend` 通道必需；发件域名必须在 Resend 验证过 |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | `smtp` 通道：内网中继地址与认证。**账号密码必须成对**，无认证中继两个都留空 |

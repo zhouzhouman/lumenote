@@ -28,10 +28,23 @@ const STRENGTH_STYLE: { bar: string; text: string }[] = [
   { bar: 'bg-emerald-600', text: 'text-emerald-700 dark:text-emerald-400' },
 ];
 
-export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
+export function AuthForm({
+  mode,
+  /**
+   * 是否要求邮箱验证码。
+   *
+   * 由服务端按 `REQUIRE_EMAIL_VERIFICATION` 传入，**不由客户端自己判断**：
+   * 关闭时后端会直接忽略 code，前端隐藏控件只是让表单别多要一个填不了的东西。
+   */
+  requireEmailVerification = true,
+}: {
+  mode: 'login' | 'register';
+  requireEmailVerification?: boolean;
+}) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const isRegister = mode === 'register';
+  const needsCode = isRegister && requireEmailVerification;
 
   const [email, setEmail] = React.useState('');
   const [password, setPassword] = React.useState('');
@@ -152,7 +165,13 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
       await apiPost(
         isRegister ? '/api/auth/register' : '/api/auth/login',
         isRegister
-          ? { email, password, name: name.trim() || undefined, code }
+          ? {
+              email,
+              password,
+              name: name.trim() || undefined,
+              // 不要求验证时不传 code：传空串会撞上 schema 的 min(4)
+              ...(needsCode ? { code } : {}),
+            }
           : { email, password },
       );
       /**
@@ -178,7 +197,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
 
   const strengthStyle = STRENGTH_STYLE[strength.score]!;
   const canSubmit = isRegister
-    ? Boolean(email && password && code && !submitting)
+    ? Boolean(email && password && (!needsCode || code) && !submitting)
     : Boolean(email && password && !submitting);
 
   return (
@@ -187,7 +206,9 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
         <CardTitle className="text-xl">{isRegister ? '创建账号' : '登录'}</CardTitle>
         <CardDescription>
           {isRegister
-            ? '注册需要邮箱验证码，用来确认邮箱是你本人的'
+            ? needsCode
+              ? '注册需要邮箱验证码，用来确认邮箱是你本人的'
+              : '填账号和密码即可注册（本站未开启邮箱验证）'
             : '欢迎回来，继续你的文本工作流'}
         </CardDescription>
       </CardHeader>
@@ -222,7 +243,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
                 autoComplete="email"
                 aria-invalid={Boolean(fieldErrors.email)}
               />
-              {isRegister && (
+              {needsCode && (
                 <Button
                   type="button"
                   variant="outline"
@@ -238,7 +259,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
             {fieldErrors.email && <p className="text-xs text-destructive">{fieldErrors.email}</p>}
           </div>
 
-          {isRegister && (
+          {needsCode && (
             <div className="space-y-2">
               <Label htmlFor="code">邮箱验证码</Label>
               <Input

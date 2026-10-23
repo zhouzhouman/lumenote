@@ -61,16 +61,22 @@ export async function registerTestUser(options: RegisterOptions = {}): Promise<T
   const name = options.name ?? '集成测试用户';
   const client = new ApiClient({ xff: options.xff ?? uniqueXff() });
 
+  /*
+   * 先尝试走验证码流程，但**不强制依赖它**：
+   * `REQUIRE_EMAIL_VERIFICATION=false` 的部署（默认）注册不需要验证码，
+   * 此时这个接口不会回传 devCode —— 那不是错误，而是当前配置的正常结果。
+   * 若站点开启了验证而这里拿不到码，注册会失败并带上明确报错，不会静默通过。
+   */
   const sent = await client.post('/api/auth/verification', { email, purpose: 'register' });
   const devCode = sent.json?.data?.devCode;
-  if (sent.status !== 200 || typeof devCode !== 'string' || !/^\d{4,6}$/.test(devCode)) {
-    throw new Error(
-      `发送注册验证码失败（HTTP ${sent.status}）：${sent.text.slice(0, 500)}\n` +
-        '提示：集成测试要求被测应用以 MAIL_TRANSPORT=console 且 NODE_ENV!=production 启动。',
-    );
-  }
+  const code = typeof devCode === 'string' && /^\d{4,6}$/.test(devCode) ? devCode : undefined;
 
-  const registered = await client.post('/api/auth/register', { email, password, name, code: devCode });
+  const registered = await client.post('/api/auth/register', {
+    email,
+    password,
+    name,
+    ...(code ? { code } : {}),
+  });
   if (registered.status !== 200) {
     throw new Error(
       `注册失败（HTTP ${registered.status}）：${registered.text.slice(0, 500)}`,
