@@ -30,6 +30,17 @@ const nonNegativeIntFromEnv = (def: number) =>
     .transform((v) => (v === undefined || v === '' ? def : Number(v)))
     .pipe(z.number().int().min(0));
 
+/**
+ * 空字符串视为「未设置」。
+ *
+ * ⚠️ docker compose 会把**未定义的变量传成空串**（`${VAR:-}` 的写法）。
+ * 直接 `z.coerce.number()` 会把 `''` 变成 0，然后撞上 `.positive()` ——
+ * 表现是容器启动/首个请求报「环境变量校验失败」，而宿主机的 `.env` 看起来完全正常。
+ * 这个坑只在容器里出现，本地 pnpm dev 永远复现不了。
+ */
+const emptyAsUndefined = (v: unknown) =>
+  typeof v === 'string' && v.trim() === '' ? undefined : v;
+
 const serverSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL 不能为空'),
   DIRECT_URL: z.string().optional(),
@@ -167,7 +178,10 @@ const serverSchema = z.object({
    */
   SMTP_HOST: z.string().optional(),
   /** 缺省按端口约定推断：465 → 直连 TLS，其余 → 587 明文 + STARTTLS */
-  SMTP_PORT: z.coerce.number().int().positive().optional(),
+  SMTP_PORT: z.preprocess(
+    emptyAsUndefined,
+    z.coerce.number().int().positive().optional(),
+  ),
   /** 'true' / 'false' 显式指定是否直连 TLS；不填则按端口推断 */
   SMTP_SECURE: z.string().optional(),
   SMTP_USER: z.string().optional(),
@@ -227,6 +241,13 @@ const serverSchema = z.object({
 });
 
 export type ServerEnv = z.infer<typeof serverSchema>;
+
+/**
+ * 导出 schema 供单测直接校验单个字段（`serverEnvSchema.shape.SMTP_PORT`）。
+ * 不导出整个 env() 的原因：env() 会做一次全量校验并要求 AUTH_SECRET 等，
+ * 测单条规则时不该被无关字段牵连。
+ */
+export { serverSchema as serverEnvSchema };
 
 function load(): ServerEnv {
   const parsed = serverSchema.safeParse(process.env);
