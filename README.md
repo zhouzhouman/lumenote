@@ -544,7 +544,10 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
     该环境变量仅保留给限流 store / 后续接入，不要把它当作生效的全局限流；
     实际生效的是 auth 与任务创建维度的限流桶（见安全章节）。
 11. **生产必须换掉 console 邮件通道**：`MAIL_TRANSPORT=console` 在生产环境不会发信、
-    也不会回传验证码 → 新用户无法注册；必须用 `resend` + `RESEND_API_KEY`（smtp 未接入）。
+    也不会回传验证码 → 新用户无法注册。真发信两种选择：公网 `resend`（+`RESEND_API_KEY`
+    + 验证过的发件域名），或内网 `smtp`（中继 / `SMTP_DIRECT` 直投 MX，见「内网 SMTP」）。
+    ⚠️ SMTP 实现基于 nodemailer，**没有做发送重试**：上游 4xx（灰名单、限流）会直接失败，
+    用户得自己点重发。
 12. **seed 的演示账号是固定开发密码**：`demo@lumenote.dev / Lumenote2026!` 只用于演示环境；
     生产不要执行 `pnpm prisma:seed`，或执行后立即删除/改密该账号。
 13. **seed 对内置模板是「原地更新 v1」**：改模板文案后重跑 seed 会改写 `PromptVersion(version=1)`
@@ -595,8 +598,9 @@ curl -s localhost:3000/api/health # 200 且 "db":{"ok":true}
 > 📮 **注册收不到验证码？先看这里。**
 > 默认 `MAIL_TRANSPORT=console`（`docker-compose.yml` 的缺省值）**不会真发信** ——
 > 验证码只写进容器日志：`docker compose logs app --tail 50 | grep 验证码`。
-> 要真发信必须配 `MAIL_TRANSPORT=resend` + `RESEND_API_KEY` + **在 Resend 验证过的发件域名**
-> （`MAIL_FROM` 的域名没验证，Resend 会返回 403，接口报 502）；`smtp` 通道尚未接入。
+> 要真发信有两条路：**公网**用 `resend`（需要 `RESEND_API_KEY` + 在 Resend 验证过的发件域名，
+> 否则返回 403、接口报 502）；**内网**用 `smtp`（指向同网段的中继，或 `SMTP_DIRECT=true` 直投 MX），
+> 见下方「内网 SMTP」。
 > 接口现在会返回 `delivered` 字段区分「码已生成」与「邮件已投递」，不再用一句
 > 「验证码已发送，请查收邮件」把没发信说成发了。
 >
@@ -609,11 +613,70 @@ curl -s localhost:3000/api/health # 200 且 "db":{"ok":true}
 |---|---|
 | `AUTH_SECRET` | **必需**，无默认值，缺失时 compose 直接报错；`openssl rand -base64 32` |
 | `POSTGRES_PASSWORD` | Postgres 密码（compose 内默认 `lumenote`，生产必须改） |
-| `MAIL_TRANSPORT` / `RESEND_API_KEY` | 生产必须用 `resend` 并注入 `RESEND_API_KEY`：`console` 通道在生产环境**硬性禁止**把验证码回传客户端，也**不会真的发信** → 新用户收不到验证码、无法注册（`smtp` 尚未接入，会返回明确错误） |
+| `MAIL_TRANSPORT` | `console`（默认，不发信）/ `resend`（公网）/ `smtp`（内网中继或直投 MX）。`console` 在生产环境**硬性禁止**回传验证码，也**不会真的发信** |
+| `RESEND_API_KEY` | `resend` 通道必需；发件域名必须在 Resend 验证过 |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | `smtp` 通道：内网中继地址与认证。**账号密码必须成对**，无认证中继两个都留空 |
+| `SMTP_FROM` / `SMTP_SECURE` / `SMTP_REJECT_UNAUTHORIZED` / `SMTP_DIRECT` | 发件人（缺省用 `MAIL_FROM`）；是否直连 TLS（缺省按端口：465 是）；内网自签证书需设 `false`；`true` 表示不走中继直投收件域 MX |
 | `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | 真实模型模式需要；只开 Mock 可留空 |
 | `MOCK_LLM` | 演示/预览环境设 `true`，避免真实付费调用 |
 | `RATE_LIMIT_DRIVER` / `REDIS_URL` / `RATE_LIMIT_FAIL_MODE` | 多实例限流用 `redis`；`open` 或 `closed` 决定 Redis 故障时的行为 |
 | `TRUST_PROXY_HOPS` | 反代层数；默认 0（不信任 XFF）。⚠️ 0 时所有请求共享 `unknown` 限流桶（可被刷成全局 429）；反代部署按实际层数设置，且应用端口只对代理开放。注意 compose 默认把 3000 端口发布到宿主 |
+
+
+#### 内网 SMTP：不经过公网，直接发给同网段的人
+
+三种形态，选一种对上你的网络：
+
+| 你的网络里有什么 | 怎么配 | 注意 |
+|---|---|---|
+| **一台内网中继**（Exchange / 企业邮箱 / postfix / 群晖 MailPlus） | `MAIL_TRANSPORT=smtp` + `SMTP_HOST=mail.intra.local` + `SMTP_PORT`（25/587/465） | 最可靠。有认证就填 `SMTP_USER`/`SMTP_PASS`（必须成对） |
+| **没有任何中继**，但邮件服务器就在同网段 | `SMTP_DIRECT=true` | 直投收件域的 MX，**要出站 25 端口**。办公网/家宽/云主机默认普遍封 25；同域内网（`@corp.local` 的 MX 指向内网 IP）可行 |
+| **整个环境没有邮件服务器** | 别用邮件 | 邮件通道走不通，不是配置问题。见下方「没有邮件服务器时」 |
+
+自签证书的内网中继（很常见）必须加：
+
+```bash
+SMTP_REJECT_UNAUTHORIZED=false
+```
+
+否则握手时报 `self signed certificate in certificate chain`，而这句话不会告诉你
+「关掉校验就行」——所以这里明确写出来。**只在可信内网这么干。**
+
+配置示例（`.env`）：
+
+```bash
+MAIL_TRANSPORT=smtp
+SMTP_HOST=mail.intra.local
+SMTP_PORT=587
+SMTP_USER=lumenote@intra.local
+SMTP_PASS=********
+SMTP_FROM="流光笔记 <lumenote@intra.local>"
+# 自签证书才需要下一行
+# SMTP_REJECT_UNAUTHORIZED=false
+```
+
+改完必须**重建 app 容器**（env 变了容器不会自己更新）：
+
+```bash
+docker compose up -d app
+docker compose logs app --tail 20 | grep -i smtp   # 失败原因会打在这里
+```
+
+排错顺序：`SMTP_HOST`/端口通不通（`nc -vz mail.intra.local 587`）→ 证书是否自签 →
+账号密码是否成对 → `SMTP_FROM` 的域名是否被中继允许代发（很多中继只允许
+「发件人 = 登录账号」的地址，否则回 550）。
+
+##### 没有邮件服务器时
+
+邮件这个通道本质上需要「有人替你收信」。局域网里没有任何 SMTP 服务器时，
+配 `smtp`/`resend` 都不会成功。此时的现实选项：
+
+1. **保持 `console`，从日志取码**（内网自用最省事）：
+   `docker compose logs app --tail 50 | grep 验证码`；
+2. **起一个只收不发的本地邮箱**：在 compose 里加 `mailpit`，验证码能在
+   `http://localhost:8025` 的网页里看到 —— 适合演示与联调，但**用户仍然要打开这个页面**；
+3. **绕开邮件**：由管理员发放邀请码 / 关闭邮箱验证。这才是「内网无邮件设施」的正解，
+   但会改动注册流程（当前未实现）。
 | `RATE_LIMIT_PER_MINUTE` | ⚠️ **当前未接入路由**：`rateLimitByIp()` 没有调用点，该值仅保留给限流 store / 后续接入；实际生效的是 auth 与任务创建维度的限流桶 |
 | `NEXT_PUBLIC_APP_URL` | 站点地址（生产 HTTPS） |
 

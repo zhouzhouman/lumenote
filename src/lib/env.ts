@@ -145,6 +145,42 @@ const serverSchema = z.object({
   MAIL_FROM: z.string().default('Lumenote <no-reply@lumenote.local>'),
   RESEND_API_KEY: z.string().optional(),
 
+  // ---------- 内网 SMTP（MAIL_TRANSPORT=smtp）----------
+  /**
+   * 中继地址。填了就通过这台 SMTP 服务器投递（企业邮箱 / Exchange / postfix）。
+   * `SMTP_DIRECT=true` 时可以留空 —— 此时按收件人域名的 MX 记录直投。
+   */
+  SMTP_HOST: z.string().optional(),
+  /** 缺省按端口约定推断：465 → 直连 TLS，其余 → 587 明文 + STARTTLS */
+  SMTP_PORT: z.coerce.number().int().positive().optional(),
+  /** 'true' / 'false' 显式指定是否直连 TLS；不填则按端口推断 */
+  SMTP_SECURE: z.string().optional(),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  /** 发件人地址；缺省回落到 MAIL_FROM */
+  SMTP_FROM: z.string().optional(),
+  /**
+   * 是否校验服务器证书。内网自签证书（很多企业内部中继都是）需要设为 false。
+   *
+   * 默认 true：放宽 TLS 校验会让人在公网环境下也悄悄失去中间人防护，
+   * 这种「为了方便顺手关掉」的默认值不该由我们来定。
+   */
+  SMTP_REJECT_UNAUTHORIZED: z
+    .string()
+    .optional()
+    .transform((v) => v !== 'false'),
+  /**
+   * true = 不走中继，直接投递到收件人域名的 MX。
+   *
+   * ⚠️ 要求出站 25 端口可用，且收件方 DNS 里能查到 MX。
+   * 家宽/办公网普遍封 25，云主机默认也封 —— 所以这是「内网同域直投」用的，
+   * 不是绕过公网邮件服务商的手段。
+   */
+  SMTP_DIRECT: z
+    .string()
+    .optional()
+    .transform((v) => v === 'true'),
+
   // ---------- 登录安全 ----------
   /** 连续失败多少次后锁定账号（设为 0 关闭锁定，仅保留限流） */
   LOGIN_MAX_FAILURES: intFromEnv(5),
