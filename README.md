@@ -25,6 +25,24 @@ Lumenote 的每条结果都能回答三个问题：
 
 ---
 
+## 想读懂代码？看这套学习手册
+
+[docs/study/](docs/study/) 把整个项目拆成 9 章，每章都按
+「解决什么问题 → 数据怎么流动 → 代码在哪（file:line）→ 为什么这么设计 → 坑在哪 → 面试怎么答」写。
+
+| 文件 | 内容 |
+|---|---|
+| [README](docs/study/README.md) | 学习路径、全局地图、术语表、**全部阈值速查表** |
+| [01 请求生命周期](docs/study/01-request-lifecycle.md) | 一次提交从按钮到结果，状态机与 SSE 的真相 |
+| [02 LLM 可靠性](docs/study/02-llm-reliability.md) | 重试/熔断/降级/计费，三个"函数覆盖率最高"的模块 |
+| [03 管线](docs/study/03-pipeline.md) | 分块、Map-Reduce、Prompt 渲染、引用校验 |
+| [04 认证与安全](docs/study/04-auth-security.md) | 登录/轮换/限流/幂等/配额/SSRF/密钥加密 |
+| [05 批次与审计](docs/study/05-batch-audit.md) | 预算闸门、三类"没跑"、审计不可篡改 |
+| [06 Agent](docs/study/06-agent.md) | 多轮工具调用、按工具额度、轨迹落库 |
+| [07 测试与部署](docs/study/07-testing-deploy.md) | 单测/集成分层、CI 六 job、镜像五阶段 |
+| [08 面试题库](docs/study/08-interview-bank.md) | 60 题 + 追问链 |
+| [09 改 Bug 手册](docs/study/09-bug-handbook.md) | 症状对照表 + 13 个真实 bug 复盘 |
+
 ## 验证状态（先看这一节）
 
 > 核对于 **2026-10-21**，Windows 11 + Node v22.22 / pnpm 10.33.2 / PostgreSQL 16 /
