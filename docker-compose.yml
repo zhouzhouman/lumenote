@@ -102,6 +102,28 @@ services:
       postgres:
         condition: service_healthy
 
+  # ---------- 演示数据（可选，不是部署必需）----------
+  # 用法：docker compose --profile demo run --rm seed
+  #
+  # ⚠️ 它会创建固定密码账号 demo@lumenote.dev / Lumenote2026!，等同于公开凭据。
+  # 只在演示/联调环境用；真实部署请勿执行。
+  # 内置 Prompt 模板不依赖它 —— 应用缺模板时会自愈（见 lib/tasks/builtin-templates.ts）。
+  seed:
+    build:
+      context: .
+      target: migrator
+    image: lumenote-migrator:local
+    profiles: ['demo']
+    restart: 'no'
+    command: ['pnpm', 'prisma:seed']
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: 'postgresql://lumenote:${POSTGRES_PASSWORD:-lumenote}@postgres:5432/lumenote?schema=public'
+      DIRECT_URL: 'postgresql://lumenote:${POSTGRES_PASSWORD:-lumenote}@postgres:5432/lumenote?schema=public'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # ---------- 应用 ----------
   # 用法：docker compose --profile app up -d app
   # 前提：已执行过 migrate（顺序见文件顶部）。

@@ -579,6 +579,12 @@ SSRF 私网判定（等价写法绕过）、护栏脱敏（正则 `lastIndex` �
     关闭验证后仅有的防线是注册接口的 IP 限流（5 次/5 分钟）与密码强度校验；
     公开部署务必开启验证并配好邮件通道。另外此时**没有找回密码能力**
     （本来依赖邮件，尚未实现）——忘记密码只能由管理员改库。
+17. **镜像分层与体积**：`lumenote-app:local` ≈ 316 MB（standalone + 46 MB 依赖，
+    非 root，无 `.env`、无测试与 tsconfig，仅 6 个被 Next 追踪的源文件 80 KB）；
+    `lumenote-migrator:local` ≈ 1.4 GB —— 它要带 prisma CLI + tsx + 完整 devDependencies
+    才能执行迁移与（可选的）seed。这个体积对一次性任务容器可接受，
+    若要压到几十 MB，需要把迁移单独做成二进制或改用 `prisma migrate deploy` 的轻量客户端。
+
 
 
 ---
@@ -604,6 +610,15 @@ docker compose --profile app up -d app
 > 于是全新部署创建任务直接 500 `TEMPLATE_MISSING`；而 `prisma:seed` 又会创建
 > 固定弱密码的演示账号，生产不敢跑 —— **新部署和安全之间没有交集**。
 > 演示数据（demo 账号 + 示例文档）仍只在 `pnpm prisma:seed` 里，仅供本地开发。
+>
+> 想在容器里灌演示数据（例如做演示环境）：
+>
+> ```bash
+> docker compose --profile demo run --rm seed
+> ```
+>
+> ⚠️ 它会创建固定密码账号 `demo@lumenote.dev / Lumenote2026!`，等同公开凭据，
+> **真实部署不要执行**。命令是幂等的（重复跑不会产生重复数据）。
 
 ```bash
 # 4. 判定标准：两条都必须满足
