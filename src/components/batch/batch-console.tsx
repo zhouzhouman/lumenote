@@ -104,7 +104,8 @@ export function BatchConsole() {
         name: name.trim() || undefined,
         type,
         content,
-        params: { pointCount: Number(pointCount) || 5 },
+        // 与单篇任务接口的契约一致：params 的值一律是字符串
+        params: { pointCount: String(Number(pointCount) || 5) },
         budgetCny: budget ? Number(budget) : undefined,
       });
       router.push(`/batches/${res.batchId}`);

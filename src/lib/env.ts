@@ -152,6 +152,11 @@ const serverSchema = z.object({
    * （默认值，便于本地开发）。生产环境用 console 会导致用户收不到码，
    * 因为代码里硬性禁止把验证码回传给客户端 —— 必须换成 resend 或 smtp。
    */
+  /** 显式指定 Cookie 是否带 Secure；不填则按 NEXT_PUBLIC_APP_URL 的协议推断 */
+  COOKIE_SECURE: z.string().optional(),
+  /** 仅在需要跨子域共享登录态时设置；默认不设 = host-only（推荐） */
+  COOKIE_DOMAIN: z.string().optional(),
+
   MAIL_TRANSPORT: z.string().optional(),
   MAIL_FROM: z.string().default('Lumenote <no-reply@lumenote.local>'),
   RESEND_API_KEY: z.string().optional(),

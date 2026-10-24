@@ -30,7 +30,19 @@ const CreateBatchSchema = z.object({
   type: z.enum(['summarize', 'translate', 'write']).default('summarize'),
   /** 原始文本：多份之间用单独一行的 --- 分隔（见 lib/batch/parse.ts） */
   content: z.string().min(10, '至少粘贴一份材料（不少于 10 个字符）'),
-  params: z.record(z.string(), z.unknown()).default({}),
+  /*
+   * 参数值统一成字符串：与 `POST /api/tasks` 的 `z.record(z.string())` 保持同一契约。
+   *
+   * 之前这里用 z.unknown()，前端把 pointCount 当数字传也没报错，
+   * 而单篇任务接口对同样的请求返回 422 —— 同一个参数两套类型，
+   * 迟早会出现「批次能跑、单篇报错」的分裂行为。
+   */
+  params: z
+    .record(
+      z.string(),
+      z.union([z.string(), z.number(), z.boolean()]).transform((v) => String(v)),
+    )
+    .default({}),
   /** 预算上限（人民币）。不传 = 不限制 */
   budgetCny: z.number().positive().max(10_000).optional(),
   model: z.string().max(80).optional(),

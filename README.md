@@ -596,7 +596,16 @@ docker compose run --rm migrate
 
 # 3. 起应用（只连库，不碰 schema）
 docker compose --profile app up -d app
+```
 
+> 🧩 **不需要单独跑 seed。** 内置 Prompt 模板的定义已经放进 `src/lib/tasks/builtin-templates.ts`，
+> 应用在「模板缺失」时会**自行写入**（幂等，见 `ensureBuiltinTemplates`）。
+> 之前的坑是：模板只存在于 `prisma/seed.ts`，而镜像里没有这个文件，
+> 于是全新部署创建任务直接 500 `TEMPLATE_MISSING`；而 `prisma:seed` 又会创建
+> 固定弱密码的演示账号，生产不敢跑 —— **新部署和安全之间没有交集**。
+> 演示数据（demo 账号 + 示例文档）仍只在 `pnpm prisma:seed` 里，仅供本地开发。
+
+```bash
 # 4. 判定标准：两条都必须满足
 docker compose run --rm migrate   # 重跑也必须是 0（迁移幂等）
 curl -s localhost:3000/api/health # 200 且 "db":{"ok":true}
@@ -632,6 +641,7 @@ curl -s localhost:3000/api/health # 200 且 "db":{"ok":true}
 | `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | 真实模型模式需要；只开 Mock 可留空 |
 | `MOCK_LLM` | 演示/预览环境设 `true`，避免真实付费调用 |
 | `RATE_LIMIT_DRIVER` / `REDIS_URL` / `RATE_LIMIT_FAIL_MODE` | 多实例限流用 `redis`；`open` 或 `closed` 决定 Redis 故障时的行为 |
+| `NEXT_PUBLIC_APP_URL` / `COOKIE_SECURE` / `COOKIE_DOMAIN` | 局域网部署必须把 APP_URL 改成实际访问地址（如 `http://192.168.1.10:3000`）：Cookie 的 `Secure` 属性据此推断，仍写 `localhost` 会导致**其它主机登录后立刻掉线**。`COOKIE_SECURE` 留空即自动推断（HTTPS→true / HTTP→false）；`COOKIE_DOMAIN` 默认不设（host-only，任意主机名都能用），只有跨子域共享才需要 |
 | `TRUST_PROXY_HOPS` | 反代层数；默认 0（不信任 XFF）。⚠️ 0 时所有请求共享 `unknown` 限流桶（可被刷成全局 429）；反代部署按实际层数设置，且应用端口只对代理开放。注意 compose 默认把 3000 端口发布到宿主 |
 
 

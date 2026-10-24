@@ -62,6 +62,19 @@ export function fail(
  *  - 422 内容被过滤 → 不是用户能通过重试解决的，不该返回 5xx
  *  - 503 上游故障 → 可重试，配合 SSE 的 retryable 字段
  */
+/**
+ * 允许把原始消息透给客户端的 5xx 错误码。
+ *
+ * 判定标准：消息描述的是**部署/配置状态**，且不含用户数据、密钥、内部路径。
+ * 不要把「数据库连接失败」「某条 SQL 报错」这类放进来 —— 那才是真正的信息泄露。
+ */
+const EXPOSABLE_SERVER_CODES = new Set([
+  'TEMPLATE_MISSING',
+  'INSUFFICIENT_BALANCE',
+  'UNAUTHORIZED',
+  'MAIL_NOT_CONFIGURED',
+]);
+
 export function handleError(e: unknown): NextResponse {
   if (e instanceof ZodError) {
     const fields: Record<string, string> = {};
@@ -78,11 +91,16 @@ export function handleError(e: unknown): NextResponse {
   if (e instanceof LLMError) {
     const status = e.statusCode ?? 500;
 
-    // 服务端错误不暴露细节
-    const safeMessage =
-      status >= 500 && !['INSUFFICIENT_BALANCE', 'UNAUTHORIZED'].includes(e.code)
-        ? '服务暂时不可用，请稍后重试'
-        : e.message;
+    /*
+     * 服务端错误默认不暴露细节，但**配置类错误必须透出**：
+     *
+     * `TEMPLATE_MISSING` 这类错误码说的不是「系统内部炸了」，而是
+     * 「部署少了基础数据」。把它掩成「服务暂时不可用」，自托管的运维
+     * 只能去翻容器日志才能知道要跑 seed —— 这是纯粹的信息损耗，
+     * 而且泄漏风险为零（消息里只有模板名）。
+     */
+    const exposable = EXPOSABLE_SERVER_CODES.has(e.code);
+    const safeMessage = status >= 500 && !exposable ? '服务暂时不可用，请稍后重试' : e.message;
 
     if (status === 429) {
       return NextResponse.json(

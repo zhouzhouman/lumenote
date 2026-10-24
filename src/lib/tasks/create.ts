@@ -3,6 +3,7 @@ import { extractText } from '@/lib/pipeline/extract/text';
 import { estimateTokens } from '@/lib/llm/mock';
 import { LLMError } from '@/lib/llm/types';
 import { taskTypeDef } from '@/lib/tasks/types';
+import { ensureBuiltinTemplates } from '@/lib/tasks/builtin-templates';
 import { buildGlossaryPrompt } from '@/lib/tasks/glossary';
 import { isUniqueViolation } from '@/lib/idempotency';
 
@@ -46,26 +47,52 @@ export interface CreateTaskRecordInput {
  * ⚠️ slug 必须按 type 解析，不能写死。写死 `sys:summarize.long` 的后果是：
  * 翻译任务用摘要的提示词去跑 —— 界面显示成功，内容全错，而且极难发现。
  */
-async function resolveTemplate(type: 'summarize' | 'translate' | 'write') {
-  const typeDef = taskTypeDef(type);
-
-  const template = await prisma.promptTemplate.findFirst({
-    where: { slug: typeDef.slug, isActive: true },
+function findTemplate(slug: string) {
+  return prisma.promptTemplate.findFirst({
+    where: { slug, isActive: true },
+    // 内置模板的 (userId, slug) 唯一性在 Postgres 里对 NULL 不生效，
+    // 极端情况下可能出现重复行：固定按创建时间取最早那条，结果才稳定
+    orderBy: { createdAt: 'asc' },
     include: {
       versions: { where: { status: 'active' }, orderBy: { version: 'desc' }, take: 1 },
     },
   });
+}
 
-  if (!template || template.versions.length === 0) {
-    throw new LLMError(
-      `Prompt 模板「${typeDef.templateName}」未初始化，请先执行 pnpm prisma:seed`,
-      'TEMPLATE_MISSING',
-      false,
-      500,
-    );
+async function resolveTemplate(type: 'summarize' | 'translate' | 'write') {
+  const typeDef = taskTypeDef(type);
+
+  const found = await findTemplate(typeDef.slug);
+  if (found && found.versions.length > 0) {
+    return { template: found, version: found.versions[0]! };
   }
 
-  return { template, version: template.versions[0]! };
+  /*
+   * 自愈：模板缺失时**就地写入内置模板**，然后重查一次。
+   *
+   * 为什么要这么做，而不是「让部署方记得跑 seed」：
+   *   - 模板是系统级数据，缺了核心功能直接不可用（实测新部署返回 500 TEMPLATE_MISSING）
+   *   - `prisma:seed` 同时会创建固定弱密码的演示账号，生产环境不敢跑
+   *   → 于是「新部署」和「安全」之间没有交集，只能靠应用自己保证基础数据存在
+   *
+   * 并发安全：两个请求同时自愈时，模板可能被插入两次（slug 唯一约束对 NULL 不生效），
+   * 但 findTemplate 固定取最早一条，所以后续行为一致；pPromptVersion 有
+   * (templateId, version) 唯一键，不会重复写版本。
+   */
+  console.warn(`[templates] 模板 ${typeDef.slug} 缺失，正在写入内置模板（自愈）`);
+  await ensureBuiltinTemplates(prisma);
+
+  const retried = await findTemplate(typeDef.slug);
+  if (retried && retried.versions.length > 0) {
+    return { template: retried, version: retried.versions[0]! };
+  }
+
+  throw new LLMError(
+    `Prompt 模板「${typeDef.templateName}」未能初始化（自愈失败，请检查数据库写权限）`,
+    'TEMPLATE_MISSING',
+    false,
+    500,
+  );
 }
 
 /**
