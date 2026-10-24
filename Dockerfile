@@ -101,6 +101,11 @@ COPY package.json pnpm-lock.yaml .npmrc ./
 COPY prisma.config.ts ./
 COPY prisma/schema.prisma ./prisma/schema.prisma
 COPY prisma/migrations ./prisma/migrations
+# seed 脚本与它依赖的 src（模板定义 + 任务类型注册表 + Mock Token 估算）。
+# 整个 src 一起拷而不是逐文件挑：seed 一旦新增 import，逐文件白名单会在运行时
+# 才炸（`Cannot find module`），而这行是构建期最不容易被注意到的地方。
+COPY prisma/seed.ts ./prisma/seed.ts
+COPY src ./src
 
 # 预取 Prisma 的 schema engine 二进制。
 # 原因：pnpm 10 拦截了 @prisma/engines 的 postinstall（见 deps 阶段注释），
@@ -108,6 +113,14 @@ COPY prisma/migrations ./prisma/migrations
 # 才让 CLI 去下载，部署环境通常没有外网 —— 那会变成「迁移失败」而不是「下载失败」，
 # 排查成本高得多。`prisma -v` 会触发引擎下载并校验。
 RUN pnpm exec prisma -v
+
+# 生成 Prisma Client。
+#
+# `migrate deploy` 不需要它，但 `prisma:seed` 需要 —— seed 直接 import
+# `@prisma/client`，而 deps 阶段只装了依赖、没生成产物。缺了这行，
+# 演示数据容器会在运行时抛 MODULE_NOT_FOUND（.prisma/client 不存在），
+# 报错栈还指向 node_modules 深处，很难看出是「构建期少了一步」。
+RUN pnpm exec prisma generate
 
 # 显式失败语义：迁移失败 → 容器以非 0 退出，编排层据此中止部署。
 CMD ["pnpm", "prisma:deploy"]
