@@ -180,7 +180,13 @@ services:
       SMTP_REJECT_UNAUTHORIZED: '${SMTP_REJECT_UNAUTHORIZED:-}'
       SMTP_DIRECT: '${SMTP_DIRECT:-}'
       # ---- 应用 ----
+      # ⚠️ 局域网部署要改成实际访问地址（如 http://192.168.1.10:3000），
+      # Cookie 的 Secure 属性据此推断；写成 localhost 会导致别的主机登录不上
       NEXT_PUBLIC_APP_URL: '${NEXT_PUBLIC_APP_URL:-http://localhost:3000}'
+      # 留空 = 按 APP_URL 协议自动推断；内网走 HTTP 时不要设 true
+      COOKIE_SECURE: '${COOKIE_SECURE:-}'
+      # 仅在需要跨子域共享登录态时设置（如 .example.com）
+      COOKIE_DOMAIN: '${COOKIE_DOMAIN:-}'
     healthcheck:
       # 与 Dockerfile 中的 HEALTHCHECK 相同：/api/health 只有在 db.ok 时才 200，
       # 因此这里同时覆盖「进程活着」与「数据库可用」。

@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db';
 import { handleError } from '@/lib/api';
 import { requireActor } from '@/lib/auth/authz';
 import { auditActionLabel, recordAudit, auditContextFrom, AUDIT_OUTCOME_LABELS } from '@/lib/audit/log';
+import { contentDisposition } from '@/lib/http/download';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -43,6 +44,27 @@ export async function GET(req: Request) {
       },
     });
 
+    const stamp = new Date().toISOString().slice(0, 10);
+    const filename = `audit-${stamp}-${isAuditor ? 'all' : 'self'}`;
+
+    // 先构造响应，成功了再记账（顺序反了会把失败也记成 success）
+    const response =
+      format === 'json'
+        ? new Response(JSON.stringify(rows, null, 2), {
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Content-Disposition': contentDisposition(`${filename}.json`),
+              'Cache-Control': 'no-store',
+            },
+          })
+        : new Response(buildCsv(rows), {
+            headers: {
+              'Content-Type': 'text/csv; charset=utf-8',
+              'Content-Disposition': contentDisposition(`${filename}.csv`),
+              'Cache-Control': 'no-store',
+            },
+          });
+
     await recordAudit({
       userId: actor.userId,
       actorEmail: actor.email,
@@ -52,28 +74,7 @@ export async function GET(req: Request) {
       context: auditContextFrom(req),
     });
 
-    const stamp = new Date().toISOString().slice(0, 10);
-    const filename = `audit-${stamp}-${isAuditor ? 'all' : 'self'}`;
-
-    if (format === 'json') {
-      return new Response(JSON.stringify(rows, null, 2), {
-        headers: {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Content-Disposition': `attachment; filename="${filename}.json"`,
-          'Cache-Control': 'no-store',
-        },
-      });
-    }
-
-    return new Response(buildCsv(rows), {
-      headers: {
-        'Content-Type': 'text/csv; charset=utf-8',
-        // 中文名用 filename*，否则部分浏览器存成乱码
-        'Content-Disposition':
-          `attachment; filename="${filename}.csv"; filename*=UTF-8''${encodeURIComponent(filename)}.csv`,
-        'Cache-Control': 'no-store',
-      },
-    });
+    return response;
   } catch (e) {
     return handleError(e);
   }

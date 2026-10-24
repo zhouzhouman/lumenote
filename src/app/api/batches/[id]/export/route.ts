@@ -3,6 +3,7 @@ import { handleError, fail } from '@/lib/api';
 import { requireActor } from '@/lib/auth/authz';
 import { recordAudit, auditContextFrom } from '@/lib/audit/log';
 import { usdToCny } from '@/lib/llm/pricing';
+import { contentDisposition } from '@/lib/http/download';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -76,9 +77,31 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         : buildMarkdown(batch, tasks, usdToCny(batch.costUsd));
 
     /*
-     * 导出的审计要**在返回文件之前**写：这个动作本身就等于「数据出站」，
-     * 事后补记会漏掉「导出失败了但文件已经生成」的边界。
+     * 先构造 Response，成功之后再写审计。
+     *
+     * 顺序反过来的教训：之前是先记账再构造，结果中文批次名让
+     * `new Response()` 抛 TypeError（用户拿到 500），审计里却留下一条
+     * `batch.export success` —— 记录与事实相反，比缺一条记录更糟。
+     * 审计的意义是「发生了什么」，所以必须在动作真正成功之后写。
      */
+    const response = new Response(body, {
+
+      status: 200,
+      headers: {
+        'Content-Type':
+          format === 'csv'
+            ? 'text/csv; charset=utf-8'
+            : 'text/markdown; charset=utf-8',
+        /*
+         * ⚠️ 不能直接把中文名拼进 filename="…"：HTTP 头只允许 ASCII，
+         * 中文批次名会让构造 Response 时抛 TypeError（用户看到的是 500）。
+         * contentDisposition 会同时给出 ASCII 兜底名与 RFC 5987 编码的真实名。
+         */
+        'Content-Disposition': contentDisposition(`${filenameBase}.${format}`),
+        'Cache-Control': 'no-store',
+      },
+    });
+
     await recordAudit({
       userId: actor.userId,
       actorEmail: actor.email,
@@ -89,20 +112,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
       context: auditContextFrom(req),
     });
 
-    return new Response(body, {
-      status: 200,
-      headers: {
-        'Content-Type':
-          format === 'csv'
-            ? 'text/csv; charset=utf-8'
-            : 'text/markdown; charset=utf-8',
-        // 中文文件名用 RFC 5987 的 filename*，否则部分浏览器会存成乱码
-        'Content-Disposition':
-          `attachment; filename="${filenameBase}.${format}"; ` +
-          `filename*=UTF-8''${encodeURIComponent(filenameBase)}.${format}`,
-        'Cache-Control': 'no-store',
-      },
-    });
+    return response;
   } catch (e) {
     return handleError(e);
   }
